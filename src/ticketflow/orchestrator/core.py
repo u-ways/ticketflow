@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from ticketflow.config import Config
 from ticketflow.domain.errors import DependencyCycle
@@ -69,6 +69,10 @@ def _k_unresolved(node_id: str) -> str:
 
 def _k_lease_expiries(node_id: str) -> str:
     return f"lease_expiries:{node_id}"
+
+
+def _k_conflict(node_id: str) -> str:
+    return f"conflict_attempted:{node_id}"
 
 
 def derive_node_id(provider: str, external_key: str) -> str:
@@ -618,6 +622,30 @@ class Orchestrator:
             self._enter_feedback_cycle(node, pr_number, failed, changes_requested, report)
             return
 
+        if status.mergeable is False:
+            # Conflict resolution gets a tighter leash than normal feedback:
+            # one narrow attempt, then escalate (ADR-0008, spec §12.1) — this
+            # is where agents silently discard other people's work.
+            if self._store.kv_get(_k_conflict(node_id)) is not None:
+                self._escalate(
+                    node,
+                    "merge conflict unresolved after one resolution attempt",
+                    report,
+                    attempt=node.attempt_count or None,
+                )
+                return
+            self._store.kv_set(_k_conflict(node_id), "1")
+            base = self._codehost.default_branch() or "main"
+            feedback = (
+                "The pull request cannot merge because of a rebase conflict with "
+                f"`{base}`. Rebase your branch onto `origin/{base}`, resolve the "
+                "conflicts — preserving BOTH your changes and the other work; do "
+                "not discard anyone's changes — then force-push the branch. Do "
+                "nothing else."
+            )
+            self._dispatch_resume(node, feedback, "conflict_redispatch", {"pr": pr_number})
+            return
+
         # Green, threads resolved. Walk the rest of the ladder.
         if status.review_decision in (
             ReviewDecision.APPROVED,
@@ -667,7 +695,16 @@ class Orchestrator:
             ],
             changes_requested=changes_requested,
         )
+        self._dispatch_resume(
+            node, feedback, "feedback_dispatched", {"cycle": cycle, "failed_checks": list(failed)}
+        )
 
+    def _dispatch_resume(
+        self, node: Node, feedback: str, event_kind: str, payload: dict[str, Any]
+    ) -> None:
+        """Resume the node's session with feedback as a new leased attempt."""
+        now = self._clock()
+        node_id = node.node_id
         last_attempt = self._store.get_attempt(node_id, node.attempt_count)
         next_attempt = self._store.bump_attempt_count(node_id, now=now)
         if not self._store.claim_lease(
@@ -707,11 +744,11 @@ class Orchestrator:
         )
         self._store.set_state(node_id, NodeState.ADDRESSING_FEEDBACK, now=now, attempt=next_attempt)
         self._store.append_event(
-            "feedback_dispatched",
+            event_kind,
             now=now,
             node_id=node_id,
             attempt=next_attempt,
-            payload={"cycle": cycle, "failed_checks": list(failed)},
+            payload=payload,
         )
 
     # -- step 5: ready-set --------------------------------------------------

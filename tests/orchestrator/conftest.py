@@ -92,6 +92,7 @@ class Harness:
         decision: ReviewDecision = ReviewDecision.NONE,
         threads: int = 0,
         state: str = "open",
+        mergeable: bool | None = None,
     ) -> None:
         from tests.fakes import FakePr
 
@@ -101,6 +102,7 @@ class Harness:
             checks=tuple(CheckConclusion(name=n, state=s) for n, s in (checks or {}).items()),
             review_decision=decision,
             unresolved_threads=threads,
+            mergeable=mergeable,
         )
         if pr_number in self.codehost.prs:
             self.codehost.prs[pr_number].status = status

@@ -299,6 +299,35 @@ class TestSettle:
         h.orchestrator.tick()  # cycle 2 > cap: escalate
         assert h.state_of("#1") is NodeState.ESCALATED
 
+    def test_merge_conflict_gets_one_narrow_redispatch_then_escalates(self, h: Harness) -> None:
+        # ADR-0008 / spec §12.1: conflict resolution is capped at ONE attempt,
+        # distinct from the feedback cycle cap — this is where agents silently
+        # discard other people's work.
+        node_id, pr = self._run_to_awaiting(h)
+        h.set_pr(pr, checks={"ci": CheckState.SUCCESS}, mergeable=False)
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.ADDRESSING_FEEDBACK
+        assert len(h.runner.resumed) == 1
+        _, feedback = h.runner.resumed[0]
+        assert "conflict" in feedback.lower()
+        h.runner.script_exit(node_id, 2, exit_code=0)
+        h.orchestrator.tick()  # back to AwaitingSignals
+        h.orchestrator.tick()  # still conflicting: escalate, no second attempt
+        assert h.state_of("#1") is NodeState.ESCALATED
+        assert len(h.runner.resumed) == 1
+
+    def test_conflict_resolved_after_redispatch_merges(self, h: Harness) -> None:
+        node_id, pr = self._run_to_awaiting(h)
+        h.set_pr(pr, checks={"ci": CheckState.SUCCESS}, mergeable=False)
+        h.orchestrator.tick()
+        h.runner.script_exit(node_id, 2, exit_code=0)
+        # After the rebase push the host reports mergeable=None while it
+        # recomputes; the settle must NOT escalate — it proceeds down the
+        # ladder and lets the host arbitrate the merge attempt.
+        h.set_pr(pr, checks={"ci": CheckState.SUCCESS}, mergeable=None)
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.MERGED
+
     def test_approvals_missing_sets_auto_merge(self, h: Harness) -> None:
         _, pr = self._run_to_awaiting(h)
         h.codehost.merge_result = False

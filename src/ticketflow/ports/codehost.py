@@ -42,6 +42,8 @@ class PrStatus:
     checks: tuple[CheckConclusion, ...]
     review_decision: ReviewDecision
     unresolved_threads: int
+    mergeable: bool | None = None
+    """False when the host reports merge conflicts; None while unknown."""
 
     @property
     def checks_pending(self) -> bool:
