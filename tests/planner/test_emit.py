@@ -78,7 +78,7 @@ class TestHappyPath:
 
         assert report.complete
         assert report.created == 3
-        assert report.edges_written == 2
+        assert report.edges_written == 3  # every body normalized, roots too
         assert report.mirrored == 2
         assert store.plan_status(PLAN_ID) is PlanStatus.EMITTED
 
@@ -90,9 +90,14 @@ class TestHappyPath:
         assert parse_body(body0).depends_on == ()
         assert parse_body(body0).scope == ("src/",)
 
-        # Phase 2: bodies rewritten with real tracker keys, round-trippable.
+        # Phase 2: every body rewritten from the approved revision (the
+        # root included, without a depends-on line), round-trippable.
         keys = [key for key, _, _, _ in tracker.created]
-        (update1_key, update1_body), (update2_key, update2_body) = tracker.body_updates
+        (update0_key, update0_body), (update1_key, update1_body), (update2_key, update2_body) = (
+            tracker.body_updates
+        )
+        assert update0_key == keys[0]
+        assert parse_body(update0_body).depends_on == ()
         assert update1_key == keys[1]
         assert parse_body(update1_body).depends_on == (keys[0],)
         assert update2_key == keys[2]
@@ -115,7 +120,7 @@ class TestHappyPath:
         report = run_emit(store, tracker, record, clock=clock)
         assert report.complete
         keys = [key for key, _, _, _ in tracker.created]
-        assert parse_body(tracker.body_updates[1][1]).depends_on == (keys[1],)
+        assert parse_body(tracker.body_updates[2][1]).depends_on == (keys[1],)
 
     def test_unapproved_plan_refused(
         self, store: Store, clock: FakeClock, tracker: FakeTracker
@@ -183,8 +188,8 @@ class TestCrashRecovery:
         retry = run_emit(store, tracker, record, clock=clock)
         assert retry.complete
         assert retry.created == 0
-        assert retry.edges_written == 1  # only the remaining item
-        assert len(tracker.body_updates) == 2
+        assert retry.edges_written == 2  # only the remaining items
+        assert len(tracker.body_updates) == 3
 
     def test_crash_before_status_flip_completes_with_no_item_writes(
         self, store: Store, clock: FakeClock, tracker: FakeTracker
@@ -244,3 +249,70 @@ class TestAnomalies:
         failures = [e for e in store.events_after(0) if e.kind == "plan_mirror_failed"]
         assert len(failures) == 2
         assert all(entry.mirrored_at is None for entry in store.emitted_items(PLAN_ID))
+
+
+class TestClosedTrackerItems:
+    def test_closing_a_duplicate_is_the_supported_recovery(
+        self, store: Store, tracker: FakeTracker, clock: FakeClock
+    ) -> None:
+        # The concurrent-emit anomaly tells the operator to close the
+        # duplicate; the sweep must then ignore the closed ticket instead of
+        # raising the two-claimants anomaly forever.
+        plan = approved(store, clock, three_item_plan())
+        store.record_emitted_item(plan.plan_id, 0, external_key="#900", now=clock())
+        tracker.items.append(
+            TrackerItem(
+                provider="github",
+                external_key="#900",
+                title="Scaffold",
+                body=render_child_body("Create it.", plan_id=plan.plan_id, item_index=0),
+            )
+        )
+        tracker.items.append(
+            TrackerItem(
+                provider="github",
+                external_key="#901",
+                title="dup",
+                body=render_child_body("dup", plan_id=plan.plan_id, item_index=0),
+                closed=True,
+            )
+        )
+        report = run_emit(store, tracker, plan, clock=clock)
+        assert report.failure is None
+
+    def test_a_closed_orphan_is_never_adopted(
+        self, store: Store, tracker: FakeTracker, clock: FakeClock
+    ) -> None:
+        # Crash window, then a human closed the partial as junk: adopting it
+        # would wire downstream work to a ticket nobody will ever run.
+        plan = approved(store, clock, three_item_plan())
+        tracker.items.append(
+            TrackerItem(
+                provider="github",
+                external_key="#902",
+                title="junk",
+                body=render_child_body("junk", plan_id=plan.plan_id, item_index=0),
+                closed=True,
+            )
+        )
+        report = run_emit(store, tracker, plan, clock=clock)
+        assert report.adopted == 0
+        entries = {e.item_index: e.external_key for e in store.emitted_items(plan.plan_id)}
+        assert entries[0] != "#902"  # freshly created, not the closed junk
+
+
+class TestMirrorPhaseFailures:
+    def test_store_failure_during_mirroring_is_routed_to_the_failure_surface(
+        self, store: Store, tracker: FakeTracker, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plan = approved(store, clock, three_item_plan())
+
+        def boom(*_args: object, **_kwargs: object) -> bool:
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(store, "mark_item_mirrored", boom)
+        report = run_emit(store, tracker, plan, clock=clock)
+        assert report.failure is not None
+        assert "disk full" in report.failure
+        kinds = [e.kind for e in store.events_after(0)]
+        assert "plan_emit_failed" in kinds

@@ -6,7 +6,8 @@
   ADR-0009), and `kv`, a small bookkeeping table for orchestrator operational
   state: sync/projection cursors, the dispatch-pause flag, per-node PR
   numbers, bootstrap flags, pending operator feedback, unresolved-dependency
-  holds, and per-cycle check re-run records. `kv` never carries canonical
+  holds, per-cycle check re-run records, and per-node plan holds
+  (ADR-0014). `kv` never carries canonical
   node state (states, edges, leases, attempts live in their own tables); its
   values are operational marks that are either reconstructible or advisory.
   One narrow write exception accompanies the reader rule: intent ingress

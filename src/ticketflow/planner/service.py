@@ -17,7 +17,12 @@ from collections.abc import Callable
 from datetime import datetime
 
 from ticketflow.config import Config
-from ticketflow.domain.errors import PlanTurnRefused, PlanValidationError, UnknownEpic
+from ticketflow.domain.errors import (
+    PlanEmitFailed,
+    PlanTurnRefused,
+    PlanValidationError,
+    UnknownEpic,
+)
 from ticketflow.domain.plan import PlanRecord, PlanStatus
 from ticketflow.planner.approval import consume_plan_intents, yaml_sha256
 from ticketflow.planner.emit import EmitReport, run_emit
@@ -62,11 +67,11 @@ class Planner:
 
     # -- lifecycle turns ----------------------------------------------------
 
-    def new(self, epic_key: str) -> PlanRecord:
+    def new(self, epic_key: str, *, replan: bool = False) -> PlanRecord:
         """Ingest → ground → synthesize, resuming from wherever a previous
         run stopped. Under ``--yolo`` the approval intent is written and
         emission chained in the same invocation (ADR-0013)."""
-        plan = self.ingest(epic_key)
+        plan = self.ingest(epic_key, replan=replan)
         if plan.status in (PlanStatus.INGESTED, PlanStatus.GROUNDING):
             self.ground(epic_key)
             plan = self._require_plan(epic_key)
@@ -75,13 +80,16 @@ class Planner:
             plan = self._require_plan(epic_key)
         if self._yolo and plan.status is PlanStatus.IN_REVIEW:
             self.request_approval(epic_key, source="yolo")
-            self.emit(epic_key)
+            report = self.emit(epic_key)
+            if report.failure:
+                # Unattended runs must not swallow a partial emission.
+                raise PlanEmitFailed(report.failure)
             refreshed = self._store.get_plan(plan.plan_id)
             assert refreshed is not None
             plan = refreshed
         return plan
 
-    def ingest(self, epic_key: str) -> PlanRecord:
+    def ingest(self, epic_key: str, *, replan: bool = False) -> PlanRecord:
         provider = self._provider()
         existing = self._store.plan_for_epic(provider, epic_key)
         if existing is not None:
@@ -91,6 +99,14 @@ class Planner:
             existing = consume_plan_intents(self._store, existing, clock=self._clock)
             if existing.status is not PlanStatus.DISCARDED:
                 return existing
+        latest = self._store.latest_plan_for_epic(provider, epic_key)
+        if latest is not None and latest.status is PlanStatus.EMITTED and not replan:
+            # Re-planning an emitted epic emits a SECOND set of children —
+            # a human decision (spec §13.6), never a default.
+            raise PlanTurnRefused(
+                f"{epic_key} was already planned and emitted as {latest.plan_id}; "
+                "re-run with --re-plan to deliberately plan a second wave"
+            )
         self._fetch_epic(epic_key)  # fail before creating anything
         now = self._clock()
         plan_id = derive_plan_id(provider, epic_key, now)
@@ -250,7 +266,15 @@ class Planner:
         plan = self._require_plan(epic_key)
         if plan.status is not PlanStatus.IN_REVIEW:
             raise PlanTurnRefused(f"plan is {plan.status.value}; expected in_review")
-        self.validate_file(epic_key)
+        working_copy = self._config.plans_dir / plan_filename(epic_key)
+        if working_copy.is_file():
+            self.validate_file(epic_key)
+        else:
+            # SQLite is the truth (ADR-0003): a deleted working copy is
+            # regenerated from the current revision, not an error.
+            current = self._store.get_plan_revision(plan.plan_id, plan.current_revision)
+            assert current is not None
+            write_plan_file(self._config.plans_dir, epic_key, current.yaml)
         plan = self._require_plan(epic_key)
         target = revision if revision is not None else plan.current_revision
         if target != plan.current_revision:
@@ -283,10 +307,20 @@ class Planner:
         Rejection has no later natural turn the way approval has ``emit``,
         so this turn applies it immediately — the signal still enters
         through the intents table (ADR-0004), exactly like yolo's
-        auto-approval does."""
+        auto-approval does. A pending, never-consumed approval is superseded:
+        the reject is the human's last word, and while the emission ledger is
+        empty retracting the approval loses nothing. Once anything is
+        emitted there is no rollback."""
         plan = self._require_plan(epic_key)
-        if plan.status in (PlanStatus.EMITTING, PlanStatus.EMITTED):
-            raise PlanTurnRefused("the plan is approved; there is no rollback (ADR-0014)")
+        plan = consume_plan_intents(self._store, plan, clock=self._clock)
+        if plan.status is PlanStatus.EMITTING and self._store.emitted_items(plan.plan_id):
+            raise PlanTurnRefused(
+                "emission has started; there is no rollback (ADR-0014) — "
+                "re-run `plan emit` to finish, then close the children by hand "
+                "if the plan is truly wrong"
+            )
+        if plan.status is PlanStatus.EMITTED:
+            raise PlanTurnRefused("the plan is emitted; there is no rollback (ADR-0014)")
         intent_id = self._store.add_intent(
             intent_type="plan_reject",
             source=source,
@@ -301,7 +335,17 @@ class Planner:
     def emit(self, epic_key: str) -> EmitReport:
         """Consume pending plan intents, then run the idempotent emission.
 
-        Re-runnable at any time; safe when nothing is pending."""
+        Re-runnable at any time; safe when nothing is pending. After a
+        completed emission the re-run reports the existing children as a
+        no-op rather than erroring."""
+        latest = self._store.latest_plan_for_epic(self._provider(), epic_key)
+        if latest is not None and latest.status is PlanStatus.EMITTED:
+            report = EmitReport()
+            report.complete = True
+            report.child_keys = [
+                entry.external_key for entry in self._store.emitted_items(latest.plan_id)
+            ]
+            return report
         plan = self._require_plan(epic_key)
         plan = consume_plan_intents(self._store, plan, clock=self._clock)
         if plan.status is PlanStatus.DISCARDED:

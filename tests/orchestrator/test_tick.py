@@ -631,6 +631,35 @@ class TestPlannerInterlocks:
         h.orchestrator.tick()
         assert h.state_of("#102") is NodeState.BLOCKED
 
+    def test_unblock_releases_a_hold_whose_plan_is_unknown(self, h: Harness) -> None:
+        # The sanctioned release for a foreign or rebuilt database
+        # (ADR-0014 revision): the plans table has never heard of the id,
+        # so there is no emission to wait for — only an operator can judge
+        # that, and unblock is that judgement.
+        h.add_item("#102", "Orphan", body="x\n\ntf-plan: ffffffffffff/0")
+        h.orchestrator.tick()
+        assert h.state_of("#102") is NodeState.BLOCKED
+        h.store.add_intent(
+            intent_type="unblock", source="cli", node_id=h.node_id_for("#102"), now=h.clock()
+        )
+        h.orchestrator.tick()
+        assert h.state_of("#102") is NodeState.IN_PROGRESS
+        kinds = [e.kind for e in h.store.events_after(0)]
+        assert "plan_hold_released" in kinds
+
+    def test_emitted_plan_clears_the_stale_blocked_reason(self, h: Harness) -> None:
+        plan_id = self.make_emitting_plan(h)
+        h.add_item("#105", "Child", body=f"Do it.\n\ntf-plan: {plan_id}/0")
+        h.add_item("#106", "Dependent", body=f"After.\n\ntf-plan: {plan_id}/1\ndepends-on: #105")
+        h.orchestrator.tick()
+        h.store.set_plan_status(plan_id, PlanStatus.EMITTED, now=h.clock())
+        h.orchestrator.tick()
+        # #106 stays Blocked on its upstream, but the hold text must go.
+        node = h.store.get_node(h.node_id_for("#106"))
+        assert node is not None
+        assert node.state is NodeState.BLOCKED
+        assert not (node.blocked_reason or "").startswith("awaiting plan emission")
+
     def test_unblock_cannot_release_a_plan_hold(self, h: Harness) -> None:
         # Partially emitted children must never run; unblock overrides only
         # the unresolved-key hold (ADR-0014).

@@ -207,11 +207,34 @@ def seed_plan_in_synthesis(config_path: Path) -> None:
 
 
 class TestPlanCli:
-    def test_new_without_synthesis_model_exits_2(self, tmp_path: Path) -> None:
+    def test_missing_synthesis_model_refuses_only_the_synthesis_turn(self, tmp_path: Path) -> None:
+        # Model-free turns (approve, emit, ...) still build a working
+        # planner; the factory's refusing synthesizer fires only when a
+        # turn actually synthesizes.
+        import pytest as _pytest
+
+        from ticketflow.cli.factory import build_planner, open_store
+        from ticketflow.domain.errors import PlanTurnRefused
+        from ticketflow.planner.synthesis import SynthesisRequest
+
         config_path = write_planner_config(tmp_path, model=False)
-        result = runner.invoke(app, ["plan", "new", "#42", "--config", str(config_path)])
-        assert result.exit_code == 2
-        assert "synthesis_model" in result.output
+        cfg = load_config(config_path)
+        store = open_store(cfg)
+        try:
+            planner = build_planner(cfg, store)
+            synthesizer = planner._synthesizer
+            with _pytest.raises(PlanTurnRefused, match="synthesis_model"):
+                synthesizer.synthesize(
+                    SynthesisRequest(
+                        plan_id="a" * 12,
+                        epic_key="#42",
+                        epic_title="t",
+                        epic_body="b",
+                        brief="brief",
+                    )
+                )
+        finally:
+            store.close()
 
     def test_show_without_state(self, tmp_path: Path) -> None:
         config_path = write_planner_config(tmp_path)

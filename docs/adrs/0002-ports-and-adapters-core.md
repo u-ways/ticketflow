@@ -28,7 +28,9 @@
   model-API vendor surface: its import is confined to
   `src/ticketflow/adapters/pydanticai_synthesis.py`, which implements the
   planner-internal `PlanSynthesizer` Protocol — a seam inside the planner
-  package, NOT a fourth port; the port count stays exactly three. The
+  package, NOT a fourth port; the port count stays exactly three.
+  `claude_cli_synthesis` implements the same Protocol over the headless
+  CLI (no vendor SDK import; the subprocess is its vendor surface). The
   no-model rule for `orchestrator`/`graph`/`store` remains ADR-0008's
   canonical bullet.
 
@@ -89,7 +91,7 @@ The orchestrator is deterministic Python. No model runs in the scheduling loop
 decide what runs next.
 
 Lay the packages out as
-`src/ticketflow/{domain,store,graph,orchestrator,planner,ports,supervision,cli,adapters/{github_tracker,jira_tracker,github_codehost,claude_runner,pydanticai_synthesis}}`.
+`src/ticketflow/{domain,store,graph,orchestrator,planner,ports,supervision,cli,adapters/{github_tracker,jira_tracker,github_codehost,claude_runner,pydanticai_synthesis,claude_cli_synthesis}}`.
 Tests exercise the core through in-memory fakes — `FakeTracker`, `FakeRunner`,
 `FakeCodeHost` — implementing the same port interfaces the real adapters do.
 

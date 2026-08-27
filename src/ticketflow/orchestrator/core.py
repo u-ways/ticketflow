@@ -222,9 +222,7 @@ class Orchestrator:
         for intent in self._store.unprocessed_intents():
             if intent.intent_type.startswith(_PLAN_INTENT_PREFIX):
                 # Left pending, no event: the planner turn consumes its own
-                # namespace (ADR-0004 revision). NOTE the unknown-intent
-                # canary tests use the hyphenated "approve-plan", which this
-                # prefix deliberately does not match.
+                # namespace (ADR-0004 revision).
                 continue
             now = self._clock()
             if intent.node_id is None and "external_key" in intent.payload:
@@ -298,9 +296,23 @@ class Orchestrator:
                 elif self._has_escalated_ancestor(node.node_id):
                     blocked_by = "escalated ancestor"
                 elif self._plan_hold_active(node.node_id):
-                    # Partially emitted children must never run; unblock
-                    # overrides only the unresolved-key hold (ADR-0014).
-                    blocked_by = "plan not fully emitted"
+                    held_plan = self._store.kv_get(_k_plan_hold(node.node_id))
+                    if held_plan is not None and self._store.plan_status(held_plan) is None:
+                        # The plans table has never heard of this id (a
+                        # foreign or rebuilt database): there is no emission
+                        # to wait for, and unblock is the sanctioned release
+                        # (ADR-0014 revision).
+                        self._store.kv_delete(_k_plan_hold(node.node_id))
+                        self._store.append_event(
+                            "plan_hold_released",
+                            now=now,
+                            node_id=node.node_id,
+                            payload={"plan_id": held_plan, "source": intent.source},
+                        )
+                    else:
+                        # Partially emitted children must never run; unblock
+                        # overrides only the unresolved-key hold (ADR-0014).
+                        blocked_by = "plan not fully emitted"
                 if blocked_by:
                     self._store.append_event(
                         "intent_unhandled",
@@ -479,12 +491,16 @@ class Orchestrator:
 
     def _plan_hold_active(self, node_id: str) -> bool:
         """True while the node's emitting plan is not yet complete; clears
-        the hold the first time the plan reads emitted."""
+        the hold — and its blocked_reason — the first time the plan reads
+        emitted."""
         plan_id = self._store.kv_get(_k_plan_hold(node_id))
         if plan_id is None:
             return False
         if self._store.plan_status(plan_id) is PlanStatus.EMITTED:
             self._store.kv_delete(_k_plan_hold(node_id))
+            node = self._store.get_node(node_id)
+            if node and (node.blocked_reason or "").startswith("awaiting plan emission"):
+                self._store.set_blocked_reason(node_id, None, now=self._clock())
             return False
         return True
 
@@ -876,6 +892,12 @@ class Orchestrator:
         now = self._clock()
         states = {n.node_id: n.state for n in self._store.list_nodes()}
         edges = self._store.all_edges()
+        for node_id, state in states.items():
+            if state is NodeState.BLOCKED:
+                # Re-checks every held child, so a hold (and its
+                # blocked_reason) clears when the plan emits even while the
+                # node stays Blocked on ordinary upstream edges.
+                self._plan_hold_active(node_id)
         for node_id in newly_ready(states, edges):
             if self._store.kv_get(_k_unresolved(node_id)) is not None:
                 continue

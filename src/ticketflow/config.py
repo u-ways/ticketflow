@@ -52,8 +52,9 @@ class PlannerConfig(BaseModel):
     backend falls back to the CLI default."""
     grounding_model: str | None = None
     """Model for the grounding agent; None uses the runner default."""
-    grounding_allowed_tools: tuple[str, ...] = ("Read", "Grep", "Glob")
-    """ToolPolicy allowlist for grounding: read-only exploration by default."""
+    grounding_allowed_tools: tuple[str, ...] = ("Read", "Grep", "Glob", "Write")
+    """ToolPolicy allowlist for grounding: read-only exploration, plus Write —
+    the phase's one output is ``brief.md`` and the workspace is disposable."""
     grounding_disallowed_tools: tuple[str, ...] = ()
     grounding_timeout_seconds: int = 1800
     """Grounding wall-clock runaway guard (ADR-0010): it terminates a stuck

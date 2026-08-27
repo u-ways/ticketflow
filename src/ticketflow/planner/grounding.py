@@ -26,10 +26,12 @@ from ticketflow.domain.plan import PlanRecord, PlanStatus
 from ticketflow.ports.runner import (
     AttemptStatus,
     NodeDispatch,
+    RunnerHandle,
     RunnerPort,
     ToolPolicy,
 )
 from ticketflow.store.store import Store
+from ticketflow.supervision.process import is_alive
 
 
 class WorkspaceProvider(Protocol):
@@ -62,6 +64,7 @@ def run_grounding(
     crashes, times out, or exits without writing ``brief.md``.
     """
     pseudo_id = grounding_workspace_id(plan.plan_id)
+    _supersede_live_orphan(store, runner, plan, pseudo_id, clock)
     if plan.status is PlanStatus.INGESTED:
         store.set_plan_status(plan.plan_id, PlanStatus.GROUNDING, now=clock())
     # Claim the attempt number before anything is dispatched (monotonic,
@@ -94,19 +97,25 @@ def run_grounding(
     )
 
     deadline = clock() + timedelta(seconds=config.planner.grounding_timeout_seconds)
-    while True:
-        result = runner.poll(handle)
-        if result.status is AttemptStatus.RUNNING:
-            if clock() >= deadline:
+    try:
+        while True:
+            result = runner.poll(handle)
+            if result.status is AttemptStatus.RUNNING:
+                if clock() >= deadline:
+                    runner.cancel(handle)
+                    raise _failed(store, plan, attempt, "grounding wall-clock guard fired", clock())
+                sleep(config.planner.poll_interval_seconds)
+                continue
+            if result.status is AttemptStatus.TIMED_OUT:
                 runner.cancel(handle)
-                raise _failed(store, plan, attempt, "grounding wall-clock guard fired", clock())
-            sleep(config.planner.poll_interval_seconds)
-            continue
-        if result.status is AttemptStatus.TIMED_OUT:
-            runner.cancel(handle)
-            reason = result.guard_reason or "runner runaway guard fired"
-            raise _failed(store, plan, attempt, reason, clock())
-        break
+                reason = result.guard_reason or "runner runaway guard fired"
+                raise _failed(store, plan, attempt, reason, clock())
+            break
+    except KeyboardInterrupt:
+        # The turn is foreground; an interrupt must not orphan the detached
+        # agent — a re-run would supersede it anyway, so end it now.
+        runner.cancel(handle)
+        raise
 
     if result.session_id is not None:
         store.set_plan_session(plan.plan_id, result.session_id, now=clock())
@@ -126,6 +135,38 @@ def run_grounding(
         payload={"plan_id": plan.plan_id, "attempt": attempt, "brief_chars": len(brief)},
     )
     return brief
+
+
+def _supersede_live_orphan(
+    store: Store,
+    runner: RunnerPort,
+    plan: PlanRecord,
+    pseudo_id: str,
+    clock: Callable[[], datetime],
+) -> None:
+    """Cancel a previous turn's still-running agent before redispatching.
+
+    Grounding turns are exclusive: the orphan's brief will never be read, and
+    the new attempt's workspace prepare would otherwise retire a live
+    process's worktree (ADR-0010's supersede, made explicit)."""
+    if plan.grounding_pid is None or plan.grounding_create_time is None:
+        return
+    if not is_alive(plan.grounding_pid, plan.grounding_create_time):
+        return
+    runner.cancel(
+        RunnerHandle(
+            node_id=pseudo_id,
+            attempt=plan.grounding_attempts,
+            pid=plan.grounding_pid,
+            create_time=plan.grounding_create_time,
+            run_dir=Path(),
+        )
+    )
+    store.append_event(
+        "plan_grounding_superseded",
+        now=clock(),
+        payload={"plan_id": plan.plan_id, "pid": plan.grounding_pid},
+    )
 
 
 def _failed(

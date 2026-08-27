@@ -30,7 +30,9 @@ was drawn from, quoted or cited from the epic, the brief or a named source.
 Propose an edge WITHOUT evidence only in unevidenced_edges. Do not invent
 plausible dependencies: a missed edge is recoverable in review, a fabricated
 one silently serializes the graph (over-prediction is the known failure
-mode, so propose fewer, better-evidenced edges)."""
+mode, so propose fewer, better-evidenced edges). Item indices are contiguous
+from 0, no edge may reference a missing item or form a cycle, and every item
+must be reachable as a small, independently mergeable change."""
 
 OUTPUT_CONTRACT = """\
 Answer with ONLY a JSON object — no prose, no markdown fences — of the form:

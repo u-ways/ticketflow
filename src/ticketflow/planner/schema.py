@@ -33,7 +33,7 @@ def derive_plan_id(provider: str, epic_key: str, created_at: datetime) -> str:
 class PlanItem(BaseModel):
     """One proposed child ticket."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     index: int = Field(ge=0)
     title: str = Field(min_length=1)
@@ -49,7 +49,7 @@ class PlanEdge(BaseModel):
     ``unevidenced_edges`` list, never in ``edges``.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     upstream: int = Field(ge=0)
     downstream: int = Field(ge=0)
@@ -60,7 +60,7 @@ class PlanEdge(BaseModel):
 class Plan(BaseModel):
     """A validated decomposition of one epic (ADR-0014)."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     plan_id: str
     epic_key: str = Field(min_length=1)

@@ -8,7 +8,7 @@ and ``ATLASSIAN_API_TOKEN``/``JIRA_API_TOKEN`` for Jira.
 import os
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 from ticketflow.config import Config
 from ticketflow.orchestrator.core import Orchestrator
@@ -91,6 +91,27 @@ def build_orchestrator(
     )
 
 
+class _UnconfiguredSynthesizer:
+    """Refuses synthesis turns until planner.synthesis_model is configured."""
+
+    def synthesize(self, request: object) -> NoReturn:
+        del request
+        self._refuse()
+
+    def revise(self, request: object) -> NoReturn:
+        del request
+        self._refuse()
+
+    @staticmethod
+    def _refuse() -> NoReturn:
+        from ticketflow.domain.errors import PlanTurnRefused
+
+        raise PlanTurnRefused(
+            "planner.synthesis_model is not set — add it under [planner] "
+            '(ADR-0011), or set synthesis_backend = "claude-cli" for the CLI default'
+        )
+
+
 def build_planner(
     config: Config,
     store: Store,
@@ -118,11 +139,13 @@ def build_planner(
             model=config.planner.synthesis_model,
             max_retries=config.planner.synthesis_max_retries,
         )
+    elif config.planner.synthesis_model is None:
+        # Model-free turns (approve, reject, emit, validate, edit) must
+        # still work; only a turn that actually synthesizes is refused.
+        synthesizer = _UnconfiguredSynthesizer()
     else:
         from ticketflow.adapters.pydanticai_synthesis import PydanticAISynthesizer
 
-        if config.planner.synthesis_model is None:
-            raise ValueError("planner.synthesis_model must be set to run the planner")
         synthesizer = PydanticAISynthesizer(
             model=config.planner.synthesis_model,
             validate=semantic_errors,

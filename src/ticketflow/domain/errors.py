@@ -52,3 +52,12 @@ class PlanValidationError(TicketflowError):
 
 class IllegalPlanTransition(TicketflowError):
     """A plan status change not present in the plan transition table (ADR-0014)."""
+
+
+class UnknownPlan(TicketflowError):
+    """An operation referenced a plan_id that does not exist."""
+
+
+class PlanEmitFailed(TicketflowError):
+    """Emission stopped partway (ADR-0014). Partials are tagged and held;
+    re-running emit resumes without duplicating them."""

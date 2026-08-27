@@ -131,7 +131,10 @@ def _apply_approval(store: Store, plan: PlanRecord, intent: Intent, now: datetim
 
 
 def _apply_rejection(store: Store, plan: PlanRecord, intent: Intent, now: datetime) -> None:
-    if plan.status in (PlanStatus.EMITTING, PlanStatus.EMITTED, PlanStatus.DISCARDED):
+    retractable = plan.status is PlanStatus.EMITTING and not store.emitted_items(plan.plan_id)
+    if plan.status in (PlanStatus.EMITTED, PlanStatus.DISCARDED) or (
+        plan.status is PlanStatus.EMITTING and not retractable
+    ):
         store.append_event(
             "plan_intent_ignored",
             now=now,

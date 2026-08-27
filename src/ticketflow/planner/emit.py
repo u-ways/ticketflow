@@ -9,10 +9,8 @@ marker back off the tracker. There is deliberately NO delete or rollback
 path anywhere in this module: on permanent failure the partials stay,
 tagged and invisible to the scheduler, and re-running emit is the recovery.
 
-Evidenced and unevidenced edges are both emitted: keeping a proposed edge
-serializes (slow but correct) where dropping it would parallelise unsafely —
-over-prediction is the safe failure direction (spec §13.2). The reviewer's
-chance to prune was the review.
+Both evidenced and unevidenced edges are emitted — pruning happened in
+review (spec §13.2, ADR-0014).
 
 Dependency mirrors (phase 3) are cosmetic and best-effort: a mirror failure
 is evented and never blocks completion (ADR-0007).
@@ -72,11 +70,10 @@ def run_emit(
         _adoption_sweep(store, tracker, plan, report, clock)
         _create_items(store, tracker, plan, approved, report, clock)
         _write_edges(store, tracker, plan, approved, report, clock)
+        _mirror(store, tracker, plan, approved, report, clock)
     except Exception as exc:
         # evented, surfaced on the epic, resumed by re-running emit (ADR-0014).
         return _failed(store, tracker, plan, report, str(exc), clock)
-
-    _mirror(store, tracker, plan, approved, report, clock)
 
     ledger = {entry.item_index: entry for entry in store.emitted_items(plan.plan_id)}
     done = all(
@@ -117,6 +114,11 @@ def _adoption_sweep(
     ledger = {entry.item_index: entry for entry in store.emitted_items(plan.plan_id)}
     items, _ = tracker.fetch_nodes(None)
     for item in items:
+        if item.closed:
+            # Closing a ticket is the operator's dedup/junk action (the
+            # anomaly message asks for exactly that): a closed item is
+            # neither adopted nor a claimant.
+            continue
         marker = parse_body(item.body).plan_marker
         if marker is None or marker[0] != plan.plan_id:
             continue
@@ -228,10 +230,10 @@ def _write_edges(
         entry = ledger[item.index]
         if entry.edges_written_at is not None:
             continue
+        # Every body is rewritten from the approved revision — including
+        # no-upstream items, so an adopted orphan's crash-window edits are
+        # normalized like everyone else's (ADR-0014).
         upstreams = _upstreams_of(approved, item.index)
-        if not upstreams:
-            store.mark_item_edges_written(plan.plan_id, item.index, now=clock())
-            continue
         keys = tuple(ledger[upstream].external_key for upstream in upstreams)
         body = render_child_body(
             item.body,

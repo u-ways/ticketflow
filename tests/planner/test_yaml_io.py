@@ -76,3 +76,40 @@ class TestPlanFiles:
         path = write_plan_file(tmp_path / "plans", "#42", "plan_id: x\n")
         assert path == tmp_path / "plans" / "42.yaml"
         assert path.read_text(encoding="utf-8") == "plan_id: x\n"
+
+
+class TestHostileRoundTrips:
+    def test_yaml_meaningful_strings_survive(self) -> None:
+        # Titles and bodies that YAML wants to reinterpret must round-trip.
+        plan = Plan(
+            plan_id=PLAN_ID,
+            epic_key="#42",
+            items=(
+                PlanItem(index=0, title="yes: or no", body="- not a list\n*not bold*\n"),
+                PlanItem(index=1, title="  spaced  ", body="unicode — ✓ — and 'quotes'"),
+            ),
+            edges=(
+                PlanEdge(
+                    upstream=0,
+                    downstream=1,
+                    confidence=0.5,
+                    evidence="a very long citation " * 20,
+                ),
+            ),
+            notes="notes with\nnewlines and #hash",
+        )
+        dumped = dump_plan(plan)
+        reloaded = load_plan(dumped)
+        assert reloaded == plan
+        assert dump_plan(reloaded) == dumped  # dumped form is the fixed point
+
+    def test_unknown_keys_reject_the_turn(self) -> None:
+        # A hand-edit typo must fail loudly, never silently drop data.
+        plan = Plan(
+            plan_id=PLAN_ID,
+            epic_key="#42",
+            items=(PlanItem(index=0, title="Only", body="Item."),),
+        )
+        text = dump_plan(plan).replace("items:", "itemz:", 1)
+        with pytest.raises(PlanValidationError):
+            load_plan(text)

@@ -2,34 +2,29 @@
 
 - Status: Accepted
 - Date: 2026-08-27
-- Revision 2026-08-27: implementation landed; deferral language removed. The
-  concrete shape: a `src/ticketflow/planner/` package (grounding via
-  `RunnerPort` with the brief captured as `brief.md`, the same file pattern
-  as handoffs; synthesis behind a planner-internal `PlanSynthesizer`
-  Protocol whose pydantic-ai implementation lives in
-  `src/ticketflow/adapters/pydanticai_synthesis.py`); plan tables via
-  migration 4 (`plans`, append-only `plan_revisions`, the
-  `plan_emitted_items` ledger); `plan_approve`/`plan_reject` intents pinned
-  by revision number and content digest; `TrackerPort` widened for emission
-  (ADR-0002 revision); a `tf-plan: <plan_id>/<item_index>` body marker
-  (ADR-0007 revision) that tags children and drives the scheduler's
-  plan-hold; repo-root `plans/<epic-key>.yaml` as the committed, hand-
-  editable working copy (SQLite stays truth); and stateless revision turns
-  (`plan revise`/`plan edit`) — the v1 review surface is the CLI plus
-  `$EDITOR`, per spec §13.5's shipping path; the TUI session host remains
-  future work. Both evidenced and unevidenced edges are emitted: keeping a
-  proposed edge serializes (slow but correct) where dropping it would
-  parallelise unsafely — over-prediction is the safe failure direction
-  (spec §13.2); the review is where pruning happens. Two-pass emission
-  rewrites child bodies from the approved revision, so a human edit to a
-  child ticket between phase 1 and a retried phase 2 is overwritten —
-  accepted for the minutes-long window. Two further accepted narrownesses:
-  concurrent emit turns for the same plan are unsupported — the ledger
-  detects the collision and fails loudly, naming the duplicate ticket to
-  close; and a plan that flips to emitted between one sync's fetch and its
-  upsert can admit a stale phase-1 body unheld for a tick — the next sync
-  corrects the body, and the repo's own gates judge anything that ran
-  early.
+- Revision 2026-08-27: implementation landed; deferral language removed.
+  The concrete shape: a `src/ticketflow/planner/` package — grounding via
+  `RunnerPort` (brief captured as `brief.md`, the handoff file pattern),
+  synthesis behind a planner-internal `PlanSynthesizer` Protocol with two
+  adapter implementations (`pydanticai_synthesis`; `claude_cli_synthesis`,
+  the headless-CLI auth story of ADR-0011, selected by
+  `planner.synthesis_backend`) — with plan tables (ADR-0003 revision),
+  digest-pinned `plan_approve`/`plan_reject` intents (ADR-0004 revision),
+  `TrackerPort` widened for emission (ADR-0002 revision), and the
+  `tf-plan:` marker (ADR-0007 revision) driving the scheduler's plan-hold.
+  `plans/<epic-key>.yaml` is the committed working copy (SQLite stays
+  truth); revision turns are stateless — the v1 review surface is the CLI
+  plus `$EDITOR` (spec §13.5); the TUI session host remains future work.
+  Accepted narrownesses: concurrent emit turns are unsupported (the ledger
+  fails loudly, naming the duplicate to close — a CLOSED tracker item is
+  neither adopted nor a claimant, so closing IS the recovery); phase 2
+  rewrites every child body from the approved revision, overwriting
+  crash-window human edits; a plan flipping to emitted mid-sync can leave
+  one stale body for a tick. Escape hatches: `EMITTING → DISCARDED` exists
+  solely to retract an approval while the emission ledger is still empty;
+  an `unblock` intent may release a hold whose plan id the plans table has
+  never heard of (a foreign or rebuilt database — there is no emission to
+  wait for); re-planning an emitted epic requires an explicit `--re-plan`.
 
 ## Context
 
@@ -170,6 +165,11 @@ The planner is a separate, offline phase in front of the scheduler.
   its own CLI turns.
 - Flag any path that marks a plan emitted before every item and edge exists,
   and any scheduler change that lets a marker-held child dispatch (including
-  via `unblock`) while its plan is not `emitted`.
+  via `unblock`) while its plan is not `emitted` — except the revision's one
+  release: an `unblock` may clear a hold whose plan id is unknown to the
+  plans table, evented as `plan_hold_released`.
+- Flag any `EMITTING → DISCARDED` path that does not verify the emission
+  ledger is empty, and any re-plan of an emitted epic without an explicit
+  operator opt-in.
 - Flag plan lifecycle state stored anywhere but `plans.status` — never in
   `nodes.state` (ADR-0006 is untouched by planning).

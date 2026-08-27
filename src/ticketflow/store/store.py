@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Self
 
-from ticketflow.domain.errors import UnknownNode
+from ticketflow.domain.errors import UnknownNode, UnknownPlan
 from ticketflow.domain.model import (
     Attempt,
     Event,
@@ -682,6 +682,18 @@ class Store:
         ).fetchone()
         return self._plan_from_row(row) if row else None
 
+    def latest_plan_for_epic(self, provider: str, epic_key: str) -> PlanRecord | None:
+        """The epic's most recent plan of ANY status — how `plan new` sees an
+        already-emitted plan before starting a duplicate (ADR-0014)."""
+        row = self._conn.execute(
+            """
+            SELECT * FROM plans WHERE provider = ? AND epic_key = ?
+            ORDER BY created_at DESC, plan_id DESC LIMIT 1
+            """,
+            (provider, epic_key),
+        ).fetchone()
+        return self._plan_from_row(row) if row else None
+
     def list_plans(self, status: PlanStatus | None = None) -> list[PlanRecord]:
         if status is None:
             rows = self._conn.execute("SELECT * FROM plans ORDER BY created_at").fetchall()
@@ -873,7 +885,7 @@ class Store:
     def _require_plan(self, plan_id: str) -> PlanRecord:
         plan = self.get_plan(plan_id)
         if plan is None:
-            raise UnknownNode(f"no such plan: {plan_id}")
+            raise UnknownPlan(f"no such plan: {plan_id}")
         return plan
 
     @staticmethod

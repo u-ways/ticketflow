@@ -294,16 +294,12 @@ def _build_planner_or_exit(
     from ticketflow.cli.factory import build_planner, open_store
 
     cfg = _load(config_path)
-    if cfg.planner.synthesis_backend == "pydantic-ai" and cfg.planner.synthesis_model is None:
-        typer.echo(
-            "planner.synthesis_model is not set. Add it under [planner] in "
-            f"{config_path} — the model always comes from config (ADR-0011) — "
-            'or set synthesis_backend = "claude-cli" to use the CLI default.',
-            err=True,
-        )
-        raise typer.Exit(code=2)
     store = open_store(cfg)
-    return cfg, store, build_planner(cfg, store, yolo=yolo)
+    try:
+        return cfg, store, build_planner(cfg, store, yolo=yolo)
+    except BaseException:
+        store.close()
+        raise
 
 
 @contextmanager
@@ -335,6 +331,10 @@ def plan_new(
     yolo: Annotated[
         bool, typer.Option("--yolo", help="Auto-approve the plan and emit it immediately.")
     ] = False,
+    replan: Annotated[
+        bool,
+        typer.Option("--re-plan", help="Deliberately plan a second wave for an emitted epic."),
+    ] = False,
 ) -> None:
     """Ground the epic, synthesize a plan, and surface it for review.
 
@@ -345,21 +345,19 @@ def plan_new(
     if yolo:
         # One warning at startup, then nothing (ADR-0013).
         typer.echo(_YOLO_WARNING, err=True)
-    cfg, store, planner = _build_planner_or_exit(config, yolo=yolo)
+    _cfg, store, planner = _build_planner_or_exit(config, yolo=yolo)
     try:
         with _plan_errors():
-            plan = planner.new(epic_key)
+            plan = planner.new(epic_key, replan=replan)
         typer.echo(
             f"plan {plan.plan_id} for {epic_key}: {plan.status.value} "
             f"(revision {plan.current_revision})"
         )
         if plan.status is PlanStatus.IN_REVIEW:
             typer.echo(
-                f"review it: `ticketflow plan show {epic_key}`, hand-edit "
-                f"{_plan_file(cfg, epic_key)} (then `ticketflow plan validate`), or "
-                f"`ticketflow plan revise {epic_key} --feedback '...'`; approve with "
-                f"`ticketflow plan approve {epic_key}` and emit with "
-                f"`ticketflow plan emit {epic_key}`."
+                f"review: ticketflow plan show {epic_key} | plan edit {epic_key} | "
+                f"plan revise {epic_key} --feedback '...'; "
+                f"then plan approve {epic_key} and plan emit {epic_key}"
             )
     finally:
         store.close()
@@ -367,11 +365,7 @@ def plan_new(
 
 @plan_app.command("show")
 def plan_show(epic_key: str, config: ConfigOption = DEFAULT_CONFIG) -> None:
-    """Show the plan: items, then edges ascending by confidence (read-only).
-
-    Review is mostly pruning (spec §13.2), so the least-evidenced proposals
-    come first and uncited ones are listed apart.
-    """
+    """Show the plan: items, then edges ascending by confidence (read-only)."""
     from ticketflow.planner.yaml_io import load_plan
 
     cfg = _load(config)
@@ -459,7 +453,9 @@ def plan_edit(epic_key: str, config: ConfigOption = DEFAULT_CONFIG) -> None:
                     return
                 write_plan_file(cfg.plans_dir, epic_key, blob.yaml)
             editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
-            subprocess.run([*shlex.split(editor), str(path)], check=True)
+            if subprocess.run([*shlex.split(editor), str(path)]).returncode != 0:
+                typer.echo("editor exited non-zero; nothing recorded.", err=True)
+                raise typer.Exit(code=1)
             revision = planner.validate_file(epic_key)
         if revision is None:
             typer.echo("no changes.")
@@ -541,8 +537,7 @@ def plan_reject(
     reason: Annotated[str, typer.Option("--reason", help="Why the plan is wrong.")],
     config: ConfigOption = DEFAULT_CONFIG,
 ) -> None:
-    """Reject the plan: a plan_reject intent is written and consumed in the
-    same turn, discarding the plan (ADR-0004)."""
+    """Reject the plan (writes and consumes a plan_reject intent, ADR-0004)."""
     _, store, planner = _build_planner_or_exit(config)
     try:
         with _plan_errors():
@@ -550,18 +545,24 @@ def plan_reject(
         if intent_id is None:
             typer.echo("that rejection is already recorded.")
         else:
-            typer.echo(
-                f"intent {intent_id} recorded (plan_reject); the plan is discarded. "
-                f"`ticketflow plan new {epic_key}` starts a fresh one."
-            )
+            from ticketflow.domain.plan import PlanStatus
+
+            plan = store.latest_plan_for_epic(_load(config).tracker.provider, epic_key)
+            if plan is not None and plan.status is PlanStatus.DISCARDED:
+                typer.echo(
+                    f"plan {plan.plan_id} discarded. "
+                    f"`ticketflow plan new {epic_key}` starts a fresh one."
+                )
+            else:
+                status = plan.status.value if plan else "unknown"
+                typer.echo(f"rejection recorded, but the plan is {status} — see `plan show`.")
     finally:
         store.close()
 
 
 @plan_app.command("emit")
 def plan_emit(epic_key: str, config: ConfigOption = DEFAULT_CONFIG) -> None:
-    """Emit the approved plan as tracker tickets. Idempotent and resumable:
-    re-running after a failure adopts what already exists (ADR-0014)."""
+    """Emit the approved plan as tracker tickets (idempotent, resumable, ADR-0014)."""
     _, store, planner = _build_planner_or_exit(config)
     try:
         with _plan_errors():

@@ -99,7 +99,8 @@ class TestSuccess:
         ground(store, runner, workspaces, config, clock)
 
         started = runner.started[0]
-        assert started.policy.allowed_tools == ("Read", "Grep", "Glob")
+        # Write included: the phase's one output is brief.md (config default).
+        assert started.policy.allowed_tools == ("Read", "Grep", "Glob", "Write")
         assert started.policy.yolo is False
         assert started.dispatch.model == "grounding-model"
 
@@ -247,3 +248,59 @@ class TestFailures:
         assert plan.grounding_attempts == 2
         assert plan.status is PlanStatus.SYNTHESIS
         assert Path(runner.started[1].dispatch.run_dir).name == "2"
+
+
+class TestOrphanedAttempts:
+    def test_a_live_previous_attempt_is_cancelled_before_redispatch(
+        self,
+        store: Store,
+        runner: FakeRunner,
+        workspaces: FakeWorkspaces,
+        config: Config,
+        clock: FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A crashed turn leaves a detached agent running; the re-run
+        # supersedes it deliberately (cancel + event) rather than yanking
+        # its worktree out from under a live process.
+        make_plan(store, clock)
+        store.set_grounding_process(PLAN_ID, pid=4242, create_time=9.5, now=clock())
+        monkeypatch.setattr(
+            "ticketflow.planner.grounding.is_alive", lambda _pid, _create_time: True
+        )
+        write_brief(workspaces)
+        runner.script_exit(grounding_workspace_id(PLAN_ID), 1)
+        ground(store, runner, workspaces, config, clock)
+        assert [handle.pid for handle in runner.cancelled] == [4242]
+        kinds = [e.kind for e in store.events_after(0)]
+        assert "plan_grounding_superseded" in kinds
+
+    def test_interrupt_mid_poll_cancels_the_detached_agent(
+        self,
+        store: Store,
+        runner: FakeRunner,
+        workspaces: FakeWorkspaces,
+        config: Config,
+        clock: FakeClock,
+    ) -> None:
+        make_plan(store, clock)
+        plan = store.get_plan(PLAN_ID)
+        assert plan is not None
+
+        def interrupt(_seconds: float) -> None:
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            run_grounding(
+                store=store,
+                runner=runner,
+                workspaces=workspaces,
+                config=config,
+                plan=plan,
+                prompt="research the epic",
+                greenfield=False,
+                yolo=False,
+                clock=clock,
+                sleep=interrupt,
+            )
+        assert len(runner.cancelled) == 1

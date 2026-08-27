@@ -80,7 +80,8 @@ repo = "u-ways/qa"
     )
     config = load_config(path)
     assert config.planner.synthesis_model is None
-    assert config.planner.grounding_allowed_tools == ("Read", "Grep", "Glob")
+    assert config.planner.grounding_allowed_tools == ("Read", "Grep", "Glob", "Write")
+    assert config.planner.synthesis_backend == "pydantic-ai"
     assert config.planner.synthesis_max_retries == 3
     assert config.plans_dir == Path("plans")
 

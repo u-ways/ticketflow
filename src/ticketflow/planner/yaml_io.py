@@ -5,7 +5,9 @@ with ``$EDITOR`` (spec §13.5) — while the byte-exact revision blob in SQLite
 stays the truth (ADR-0003). Confidence and evidence are real schema fields
 (validators need them; comments cannot be validated); a per-edge end-of-line
 comment repeats the confidence for scanability, and reloading a hand-edited
-file goes straight back through the Pydantic validators.
+file goes straight back through the Pydantic validators. Line endings
+normalize to LF across a dump/load cycle — the round-trip identity holds for
+the dumped form, not for arbitrary input bytes.
 """
 
 import re

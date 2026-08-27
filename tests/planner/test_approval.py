@@ -154,11 +154,32 @@ class TestReject:
         assert plan.status is PlanStatus.DISCARDED
         assert plan.discard_reason == "wrong split"
 
-    def test_rejection_after_approval_is_ignored(self, store: Store, clock: FakeClock) -> None:
-        # No rollback: emitting cannot be discarded (ADR-0014).
+    def test_rejection_with_an_empty_ledger_retracts_the_approval(
+        self, store: Store, clock: FakeClock
+    ) -> None:
+        # Nothing was emitted yet, so the human's last word wins (ADR-0014).
         plan = in_review(store, clock, plan_with_edges((0, 1, 0.9)))
         approval_intent(store, clock, revision=1)
         plan = consume_plan_intents(store, plan, clock=clock)
+        store.add_intent(
+            intent_type="plan_reject",
+            source="cli",
+            node_id=None,
+            payload={"plan_id": PLAN_ID, "reason": "changed my mind"},
+            external_id=f"plan_reject:{PLAN_ID}",
+            now=clock(),
+        )
+        plan = consume_plan_intents(store, plan, clock=clock)
+        assert plan.status is PlanStatus.DISCARDED
+
+    def test_rejection_after_anything_emitted_is_ignored(
+        self, store: Store, clock: FakeClock
+    ) -> None:
+        # No rollback once any item exists (ADR-0014).
+        plan = in_review(store, clock, plan_with_edges((0, 1, 0.9)))
+        approval_intent(store, clock, revision=1)
+        plan = consume_plan_intents(store, plan, clock=clock)
+        store.record_emitted_item(PLAN_ID, 0, external_key="#900", now=clock())
         store.add_intent(
             intent_type="plan_reject",
             source="cli",

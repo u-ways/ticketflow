@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from ticketflow.domain.errors import IllegalPlanTransition, UnknownNode
+from ticketflow.domain.errors import IllegalPlanTransition, UnknownPlan
 from ticketflow.domain.plan import PlanStatus
 from ticketflow.store.store import Store
 
@@ -105,13 +105,14 @@ class TestPlanTransitions:
             store.set_plan_status(PLAN_ID, PlanStatus.EMITTED, now=at(1))
         assert store.plan_status(PLAN_ID) is PlanStatus.INGESTED
 
-    def test_emitting_cannot_be_discarded(self, store: Store) -> None:
-        # No rollback for a partially emitted plan (ADR-0014).
+    def test_emitting_discard_is_the_guarded_retraction_edge(self, store: Store) -> None:
+        # The edge exists for retracting an approval nothing has acted on;
+        # its empty-ledger guard is enforced at the call site (ADR-0014).
         make_plan(store)
         advance(store, PLAN_ID, PlanStatus.GROUNDING, PlanStatus.SYNTHESIS, PlanStatus.IN_REVIEW)
         store.approve_plan(PLAN_ID, 1, now=at(4), diff={})
-        with pytest.raises(IllegalPlanTransition):
-            store.set_plan_status(PLAN_ID, PlanStatus.DISCARDED, now=at(5), reason="no")
+        plan = store.set_plan_status(PLAN_ID, PlanStatus.DISCARDED, now=at(5), reason="retracted")
+        assert plan.status is PlanStatus.DISCARDED
 
     def test_discard_records_reason(self, store: Store) -> None:
         make_plan(store)
@@ -119,7 +120,7 @@ class TestPlanTransitions:
         assert plan.discard_reason == "rejected"
 
     def test_unknown_plan_raises(self, store: Store) -> None:
-        with pytest.raises(UnknownNode):
+        with pytest.raises(UnknownPlan):
             store.set_plan_status("ghost", PlanStatus.GROUNDING, now=T0)
 
 

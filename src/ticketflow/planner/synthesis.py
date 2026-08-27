@@ -12,13 +12,15 @@ production implementation is model-backed and lives under
 from dataclasses import dataclass
 from typing import Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from ticketflow.planner.schema import Plan, PlanEdge, PlanItem
 
 
 class PlanDraft(BaseModel):
     """What a model authors: a plan minus the identity the caller owns."""
+
+    model_config = ConfigDict(extra="forbid")
 
     items: tuple[PlanItem, ...]
     edges: tuple[PlanEdge, ...] = ()

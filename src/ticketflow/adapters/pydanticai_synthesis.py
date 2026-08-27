@@ -19,7 +19,7 @@ lives in :mod:`ticketflow.planner.prompts`, not here.
 from collections.abc import Callable
 
 from pydantic_ai import Agent, ModelRetry
-from pydantic_ai.exceptions import UnexpectedModelBehavior
+from pydantic_ai.exceptions import AgentRunError
 from pydantic_ai.models import Model
 
 from ticketflow.domain.errors import PlanValidationError
@@ -91,7 +91,7 @@ class PydanticAISynthesizer:
 
         try:
             result = agent.run_sync(user_input)
-        except UnexpectedModelBehavior as exc:
+        except AgentRunError as exc:
             # Translate at the boundary: callers know the domain error, not
             # the vendor one (ADR-0002). Retries were already spent inside.
             raise PlanValidationError(f"synthesis did not converge: {exc}") from exc

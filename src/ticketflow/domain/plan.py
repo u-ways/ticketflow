@@ -43,7 +43,10 @@ PLAN_TRANSITIONS: MappingProxyType[tuple[PlanStatus, PlanStatus], str] = Mapping
         (PlanStatus.GROUNDING, PlanStatus.DISCARDED): "abandoned during grounding",
         (PlanStatus.SYNTHESIS, PlanStatus.DISCARDED): "abandoned during synthesis",
         (PlanStatus.IN_REVIEW, PlanStatus.DISCARDED): "human rejected the plan",
-        # EMITTING -> DISCARDED deliberately absent: no rollback (ADR-0014).
+        (PlanStatus.EMITTING, PlanStatus.DISCARDED): (
+            "approval retracted while the emission ledger is still empty — "
+            "once any item exists there is no rollback (ADR-0014)"
+        ),
     }
 )
 

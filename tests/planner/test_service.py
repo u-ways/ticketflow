@@ -324,3 +324,74 @@ class TestYolo:
             assert h.runner.started[0].policy.yolo is True
         finally:
             h.close()
+
+
+class TestRejectVersusPendingApproval:
+    def test_reject_supersedes_an_unconsumed_approval(self, h: Harness) -> None:
+        # BLOCKER regression: approve queued but never consumed by an emit
+        # turn; the human changes their mind. The reject is the last word —
+        # nothing was emitted, so retracting the approval loses no work.
+        h.to_review()
+        h.planner.request_approval("#42")
+        h.planner.request_rejection("#42", "changed my mind")
+        plan = h.store.latest_plan_for_epic("github", "#42")
+        assert plan is not None
+        assert plan.status is PlanStatus.DISCARDED
+        assert plan.discard_reason == "changed my mind"
+
+    def test_reject_refused_once_anything_is_emitted(self, h: Harness) -> None:
+        h.to_review()
+        h.planner.request_approval("#42")
+        h.tracker.fail_after_creates = 1  # partial emission: one child exists
+        report = h.planner.emit("#42")
+        assert report.failure is not None
+        with pytest.raises(PlanTurnRefused, match="no rollback"):
+            h.planner.request_rejection("#42", "too late")
+
+
+class TestReplanGuard:
+    def _emit_fully(self, h: Harness) -> str:
+        plan_id = h.to_review()
+        h.planner.request_approval("#42")
+        report = h.planner.emit("#42")
+        assert report.complete
+        return plan_id
+
+    def test_plan_new_after_emitted_requires_explicit_replan(self, h: Harness) -> None:
+        emitted = self._emit_fully(h)
+        with pytest.raises(PlanTurnRefused, match=emitted):
+            h.planner.ingest("#42")
+        replanned = h.planner.ingest("#42", replan=True)
+        assert replanned.plan_id != emitted
+
+    def test_emit_after_success_is_a_reported_noop(self, h: Harness) -> None:
+        self._emit_fully(h)
+        report = h.planner.emit("#42")
+        assert report.complete
+        assert report.created == 0
+        assert len(report.child_keys) == 2
+
+
+class TestYoloEmissionFailure:
+    def test_yolo_chain_surfaces_a_partial_emission(self, tmp_path: Path, config: Config) -> None:
+        from ticketflow.domain.errors import PlanEmitFailed
+
+        h = Harness(tmp_path, config, yolo=True)
+        try:
+            h.tracker.fail_after_creates = 1
+            plan = h.planner.ingest("#42")
+            h.script_grounding(plan.plan_id)
+            h.synthesizer.script(build_plan(plan.plan_id))
+            with pytest.raises(PlanEmitFailed):
+                h.planner.new("#42")
+        finally:
+            h.close()
+
+
+class TestApproveWithoutWorkingCopy:
+    def test_missing_plan_file_is_regenerated_not_fatal(self, h: Harness) -> None:
+        h.to_review()
+        path = h.config.plans_dir / plan_filename("#42")
+        path.unlink()
+        assert h.planner.request_approval("#42") is not None
+        assert path.is_file()  # regenerated from the stored revision
