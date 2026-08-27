@@ -1,0 +1,72 @@
+name: ADR Review
+
+# Reviews every pull request against the ADRs in docs/adrs/ using a Claude Opus
+# review agent (see docs/adrs/0001-record-architecture-decisions.md).
+#
+# Blocking works in two layers, both enforced by branch protection:
+#   1. This job FAILS while the diff contains unresolved ADR violations, and it
+#      is a required status check.
+#   2. Violations are posted as inline PR review comments, and branch protection
+#      requires all conversations to be resolved before merge.
+
+on:
+    pull_request:
+        types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+    contents: read
+    pull-requests: write
+
+concurrency:
+    group: adr-review-${{ github.event.pull_request.number }}
+    cancel-in-progress: true
+
+jobs:
+    adr-review:
+        name: ADR review (Opus)
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        # Dependabot PRs cannot read the OAuth secret and never touch architecture;
+        # a skipped required check does not block merge.
+        if: ${{ github.actor != 'dependabot[bot]' && !github.event.pull_request.draft }}
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  fetch-depth: 0
+
+            - uses: actions/setup-node@v7
+              with:
+                  node-version: 24
+
+            - name: Install Claude Code
+              run: npm install -g @anthropic-ai/claude-code
+
+            - name: Run ADR review agent
+              env:
+                  CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+                  GH_TOKEN: ${{ github.token }}
+                  PR_NUMBER: ${{ github.event.pull_request.number }}
+                  REPO: ${{ github.repository }}
+              run: |
+                  claude -p "$(cat .github/adr-review/prompt.md)" \
+                      --model claude-opus-5 \
+                      --allowedTools "Read,Grep,Glob,Write,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),Bash(git log:*),Bash(git diff:*),Bash(jq:*)"
+
+            - name: Enforce verdict
+              run: |
+                  VERDICT="adr-review-verdict.json"
+                  if [ ! -f "$VERDICT" ]; then
+                      echo "::error::ADR review agent produced no verdict file."
+                      exit 1
+                  fi
+                  jq . "$VERDICT"
+                  {
+                      echo "## ADR review"
+                      echo ""
+                      jq -r '.summary' "$VERDICT"
+                  } >> "$GITHUB_STEP_SUMMARY"
+                  VIOLATIONS=$(jq -r '.violations' "$VERDICT")
+                  if [ "$VIOLATIONS" != "0" ]; then
+                      echo "::error::ADR review found $VIOLATIONS violation(s). See the PR review comments; the check stays red until the diff no longer violates the ADRs."
+                      exit 1
+                  fi

@@ -1,0 +1,34 @@
+# Reference template (unsupported): diff-scoped coverage ratchet for a Python
+# repo using diff-cover. Changed lines must be covered; the base is untouched.
+name: Coverage ratchet
+
+on: pull_request
+
+permissions:
+    contents: read
+
+jobs:
+    diff-coverage:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  fetch-depth: 0
+
+            - uses: actions/setup-python@v6
+              with:
+                  python-version: "3.13"
+
+            - name: Run tests with coverage
+              run: |
+                  pip install -e ".[dev]" # adapt to your project layout
+                  pytest --cov --cov-report=xml
+
+            - name: Enforce coverage on changed lines
+              env:
+                  BASE_REF: ${{ github.event.pull_request.base.ref }}
+              run: |
+                  pip install diff-cover
+                  diff-cover coverage.xml \
+                      --compare-branch "origin/$BASE_REF" \
+                      --fail-under 90

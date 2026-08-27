@@ -1,0 +1,49 @@
+# Reference template (unsupported): an LLM policy reviewer whose ONLY question
+# is "does this change reduce the strength of our checks, and where".
+#
+# IMPORTANT: run this on a DIFFERENT model or provider to the coding agent that
+# writes your PRs — a reviewer sharing the worker's model shares its blind
+# spots. This template uses Claude; if your worker is Claude, point it at
+# another provider (and vice versa). Applies to every PR, human or agent.
+name: Policy reviewer
+
+on: pull_request
+
+permissions:
+    contents: read
+    pull-requests: write
+
+jobs:
+    policy-review:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  fetch-depth: 0
+
+            - uses: actions/setup-node@v7
+              with:
+                  node-version: 24
+
+            - name: Install Claude Code
+              run: npm install -g @anthropic-ai/claude-code
+
+            - name: Review for gate weakening
+              env:
+                  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+                  GH_TOKEN: ${{ github.token }}
+                  PR_NUMBER: ${{ github.event.pull_request.number }}
+                  REPO: ${{ github.repository }}
+              run: |
+                  claude -p "You are a policy reviewer. Your only question: does this
+                  change reduce the strength of this repository's checks, and where?
+                  Look for: deleted or weakened tests and assertions, new suppression
+                  comments, loosened lint/scanner/coverage configuration, new ignore
+                  or baseline entries, CI workflow changes that skip or soften gates.
+                  Run: gh pr diff \"\$PR_NUMBER\". If you find weakening, post ONE
+                  review (event=COMMENT) with inline comments via
+                  gh api \"repos/\$REPO/pulls/\$PR_NUMBER/reviews\", then exit with:
+                  WEAKENING FOUND. If none: post nothing and exit with: CLEAN." \
+                      --allowedTools "Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh api:*)" \
+                      | tee review-output.txt
+                  grep -q "CLEAN" review-output.txt
