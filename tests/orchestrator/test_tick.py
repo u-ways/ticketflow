@@ -157,6 +157,24 @@ class TestHarvest:
         assert h.state_of("#1") is NodeState.ESCALATED
         assert len(h.runner.cancelled) == 1
 
+    def test_lease_expiry_rolls_back_then_escalates_when_repeated(self, h: Harness) -> None:
+        # ADR-0006: lease expiry rolls back to Ready; REPEATED expiry is an
+        # escalation trigger, not an infinite re-dispatch loop.
+        h.add_item("#1", "Work")
+        h.orchestrator.tick()
+        node_id = h.node_id_for("#1")
+        for round_no in range(1, 3):
+            h.clock.advance(h.config.limits.lease_ttl_seconds + 60)
+            h.orchestrator.tick()  # expiry round_no: back to Ready, re-dispatched
+            assert h.state_of("#1") is NodeState.IN_PROGRESS, round_no
+        h.clock.advance(h.config.limits.lease_ttl_seconds + 60)
+        h.orchestrator.tick()  # third expiry hits the repeat cap
+        assert h.state_of("#1") is NodeState.ESCALATED
+        node = h.store.get_node(node_id)
+        assert node is not None
+        assert node.blocked_reason is not None
+        assert "lease" in node.blocked_reason
+
     def test_quota_failure_pauses_dispatch(self, h: Harness) -> None:
         node_id = self._run_to_in_progress(h)
         h.add_item("#2", "More work")

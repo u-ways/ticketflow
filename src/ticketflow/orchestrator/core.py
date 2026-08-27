@@ -67,6 +67,10 @@ def _k_unresolved(node_id: str) -> str:
     return f"unresolved:{node_id}"
 
 
+def _k_lease_expiries(node_id: str) -> str:
+    return f"lease_expiries:{node_id}"
+
+
 def derive_node_id(provider: str, external_key: str) -> str:
     """Deterministic node identity from the originating tracker item."""
     digest = hashlib.sha256(f"{provider}:{external_key}".encode()).hexdigest()
@@ -224,6 +228,7 @@ class Orchestrator:
                 if isinstance(feedback, str) and feedback:
                     self._store.kv_set(_k_feedback(node.node_id), feedback)
                 self._store.reset_counters(node.node_id, now=now)
+                self._store.kv_delete(_k_lease_expiries(node.node_id))
                 self._store.set_state(node.node_id, NodeState.READY, now=now)
                 return
             if kind == "unblock" and node.state is NodeState.BLOCKED:
@@ -372,15 +377,30 @@ class Orchestrator:
         for node_id in self._store.expire_stale_leases(now=now):
             node = self._store.get_node(node_id)
             if node and node.state is NodeState.IN_PROGRESS:
+                # The process is presumed dead (a live one gets its lease
+                # extended every poll): retire its attempt so it stops
+                # holding dispatch capacity.
+                stale = self._store.get_attempt(node_id, node.attempt_count)
+                if stale and stale.status == "running":
+                    self._store.update_attempt(
+                        node_id, stale.attempt, status="aborted", finished_at=now
+                    )
+                expiries = int(self._store.kv_get(_k_lease_expiries(node_id)) or "0") + 1
+                self._store.kv_set(_k_lease_expiries(node_id), str(expiries))
                 self._store.append_event(
                     "lease_expired",
                     now=now,
                     node_id=node_id,
                     attempt=node.attempt_count or None,
                 )
-                self._store.set_state(
-                    node_id, NodeState.READY, now=now, attempt=node.attempt_count or None
-                )
+                if expiries >= self._config.limits.max_attempts:
+                    # ADR-0006 trigger: repeated lease expiry — the process
+                    # keeps dying without a heartbeat.
+                    self._escalate(node, f"repeated lease expiry ({expiries})", report)
+                else:
+                    self._store.set_state(
+                        node_id, NodeState.READY, now=now, attempt=node.attempt_count or None
+                    )
 
         for attempt in self._store.running_attempts():
             now = self._clock()
@@ -463,6 +483,7 @@ class Orchestrator:
             self._escalate(node, f"clean exit, empty diff (branch identical to {base})", report)
             return
 
+        self._store.kv_delete(_k_lease_expiries(node_id))
         pr_number = self._codehost.find_pr_for_branch(branch)
         if pr_number is None:
             pr_number = self._codehost.open_pr(
@@ -532,7 +553,9 @@ class Orchestrator:
 
         if status.state == "merged":
             self._record_merge(node, pr_number, status, how="host")
-            self._store.set_state(node_id, NodeState.MERGED, now=now)
+            self._store.set_state(
+                node_id, NodeState.MERGED, now=now, attempt=node.attempt_count or None
+            )
             report.merged += 1
             return
         if status.checks_pending:
@@ -546,7 +569,11 @@ class Orchestrator:
             self._store.kv_set(rerun_key, json.dumps(sorted(failed)))
             self._codehost.rerun_failed_checks(pr_number)
             self._store.append_event(
-                "checks_rerun", now=now, node_id=node_id, payload={"checks": sorted(failed)}
+                "checks_rerun",
+                now=now,
+                node_id=node_id,
+                attempt=node.attempt_count or None,
+                payload={"checks": sorted(failed)},
             )
             return
         if (raw := self._store.kv_get(rerun_key)) is not None:
@@ -573,7 +600,9 @@ class Orchestrator:
             ReviewDecision.NONE,
         ) and self._codehost.merge(pr_number):
             self._record_merge(node, pr_number, status, how="ticketflow")
-            self._store.set_state(node_id, NodeState.MERGED, now=now)
+            self._store.set_state(
+                node_id, NodeState.MERGED, now=now, attempt=node.attempt_count or None
+            )
             report.merged += 1
             return
         if self._codehost.enable_auto_merge(pr_number):
