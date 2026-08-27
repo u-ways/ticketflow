@@ -38,9 +38,7 @@ TRANSITIONS: MappingProxyType[tuple[NodeState, NodeState], str] = MappingProxyTy
         (NodeState.AWAITING_SIGNALS, NodeState.MERGED): (
             "checks green AND approvals satisfied AND review threads resolved"
         ),
-        (NodeState.AWAITING_SIGNALS, NodeState.ESCALATED): (
-            "checks stuck red past the cycle cap, or policy violation"
-        ),
+        (NodeState.AWAITING_SIGNALS, NodeState.ESCALATED): ("checks stuck red past the cycle cap"),
         (NodeState.ADDRESSING_FEEDBACK, NodeState.ESCALATED): "feedback cycle cap exceeded",
         (NodeState.ESCALATED, NodeState.READY): (
             "a human intent re-enters the machine (ADR-0004); the only exit"
@@ -49,7 +47,7 @@ TRANSITIONS: MappingProxyType[tuple[NodeState, NodeState], str] = MappingProxyTy
             "operator cancel/reject intent before the node ever ran (ADR-0006 revision)"
         ),
         (NodeState.READY, NodeState.ESCALATED): (
-            "operator cancel/reject intent, or irrecoverable dispatch failure (ADR-0006 revision)"
+            "operator cancel/reject intent (ADR-0006 revision)"
         ),
     }
 )
