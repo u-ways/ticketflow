@@ -43,6 +43,7 @@ class FakeWorkspaces:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.bootstrap_requests: list[tuple[str, int]] = []
+        self.diff_stats: dict[tuple[str, int], str] = {}
 
     def prepare(self, node_id: str, attempt: int, *, bootstrap: bool) -> Path:
         if bootstrap:
@@ -50,6 +51,9 @@ class FakeWorkspaces:
         path = self.root / node_id / str(attempt)
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def diff_stat(self, node_id: str, attempt: int, _base_branch: str) -> str:
+        return self.diff_stats.get((node_id, attempt), " 1 file changed")
 
 
 @dataclass

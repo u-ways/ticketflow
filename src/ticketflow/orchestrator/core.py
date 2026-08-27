@@ -28,7 +28,7 @@ from ticketflow.graph.ready import (
     stagger_order,
 )
 from ticketflow.orchestrator.prompts import build_feedback, build_prompt
-from ticketflow.ports.codehost import CodeHostPort, ReviewDecision
+from ticketflow.ports.codehost import CodeHostPort, PrStatus, ReviewDecision
 from ticketflow.ports.runner import (
     AttemptStatus,
     FailureClass,
@@ -81,6 +81,13 @@ class WorkspaceProvider(Protocol):
     """Prepares the per-attempt workspace (ADR-0010). Idempotent."""
 
     def prepare(self, node_id: str, attempt: int, *, bootstrap: bool) -> Path: ...
+
+    def diff_stat(self, node_id: str, attempt: int, base_branch: str) -> str:
+        """git diff --stat of the attempt's work against the base branch.
+
+        Empty output means an empty diff (ADR-0010: success is never stdout;
+        the last judgement is a non-empty diff)."""
+        ...
 
 
 @dataclass
@@ -365,8 +372,15 @@ class Orchestrator:
         for node_id in self._store.expire_stale_leases(now=now):
             node = self._store.get_node(node_id)
             if node and node.state is NodeState.IN_PROGRESS:
-                self._store.append_event("lease_expired", now=now, node_id=node_id)
-                self._store.set_state(node_id, NodeState.READY, now=now)
+                self._store.append_event(
+                    "lease_expired",
+                    now=now,
+                    node_id=node_id,
+                    attempt=node.attempt_count or None,
+                )
+                self._store.set_state(
+                    node_id, NodeState.READY, now=now, attempt=node.attempt_count or None
+                )
 
         for attempt in self._store.running_attempts():
             now = self._clock()
@@ -423,6 +437,13 @@ class Orchestrator:
         if self._store.kv_get(_k_bootstrap(node_id)):
             self._store.kv_delete(_k_bootstrap(node_id))
             if self._codehost.repo_exists():
+                self._store.append_event(
+                    "merged",
+                    now=now,
+                    node_id=node_id,
+                    attempt=attempt,
+                    payload={"how": "bootstrap-push", "checks": []},
+                )
                 self._store.set_state(node_id, NodeState.MERGED, now=now, attempt=attempt)
                 report.merged += 1
             else:
@@ -435,6 +456,12 @@ class Orchestrator:
             # empty-diff escalation (ADR-0010).
             self._escalate(node, "clean exit, empty diff (no branch pushed)", report)
             return
+        base = self._codehost.default_branch() or "main"
+        if not self._workspaces.diff_stat(node_id, attempt, base).strip():
+            # Exit code, then checks, then a NON-EMPTY diff: a pushed branch
+            # identical to the base is still an empty diff (ADR-0010).
+            self._escalate(node, f"clean exit, empty diff (branch identical to {base})", report)
+            return
 
         pr_number = self._codehost.find_pr_for_branch(branch)
         if pr_number is None:
@@ -444,7 +471,11 @@ class Orchestrator:
                 f"Automated change for node `{node_id}`.\n\n{node.body}".strip(),
             )
             self._store.append_event(
-                "pr_opened", now=now, node_id=node_id, payload={"pr": pr_number}
+                "pr_opened",
+                now=now,
+                node_id=node_id,
+                attempt=attempt,
+                payload={"pr": pr_number},
             )
         self._store.kv_set(_k_pr(node_id), str(pr_number))
 
@@ -500,6 +531,7 @@ class Orchestrator:
         report.settled += 1
 
         if status.state == "merged":
+            self._record_merge(node, pr_number, status, how="host")
             self._store.set_state(node_id, NodeState.MERGED, now=now)
             report.merged += 1
             return
@@ -540,6 +572,7 @@ class Orchestrator:
             ReviewDecision.APPROVED,
             ReviewDecision.NONE,
         ) and self._codehost.merge(pr_number):
+            self._record_merge(node, pr_number, status, how="ticketflow")
             self._store.set_state(node_id, NodeState.MERGED, now=now)
             report.merged += 1
             return
@@ -808,6 +841,25 @@ class Orchestrator:
             attempt=attempt if attempt is not None else node.attempt_count or None,
         )
         report.escalated += 1
+
+    def _record_merge(self, node: Node, pr_number: int, status: PrStatus, *, how: str) -> None:
+        """Record how the merge happened and which checks reported (ADR-0009).
+
+        Observation, not validation: this is what makes "we merged 40 PRs
+        with no gates" visible after the fact.
+        """
+        self._store.append_event(
+            "merged",
+            now=self._clock(),
+            node_id=node.node_id,
+            attempt=node.attempt_count or None,
+            payload={
+                "pr": pr_number,
+                "how": how,
+                "checks": [{"name": c.name, "state": c.state.value} for c in status.checks],
+                "review_decision": status.review_decision.value,
+            },
+        )
 
     def _has_escalated_ancestor(self, node_id: str) -> bool:
         seen: set[str] = set()

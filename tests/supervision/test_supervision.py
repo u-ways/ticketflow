@@ -141,6 +141,23 @@ class TestGitWorkspaces:
         assert not (b / "only-in-a.txt").exists()
 
 
+class TestDiffStat:
+    def test_empty_until_committed_work_exists(self, tmp_path: Path) -> None:
+        origin = TestGitWorkspaces()._make_origin(tmp_path)
+        ws = GitWorkspaces(tmp_path / "ws", remote_url=str(origin))
+        path = ws.prepare("n1", 1, bootstrap=False)
+        assert ws.diff_stat("n1", 1, "main").strip() == ""
+        (path / "new.txt").write_text("x")
+        env_args = ["-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run(["git", *env_args, "add", "."], cwd=path, check=True)
+        subprocess.run(["git", *env_args, "commit", "-qm", "work"], cwd=path, check=True)
+        assert "new.txt" in ws.diff_stat("n1", 1, "main")
+
+    def test_missing_worktree_reports_empty(self, tmp_path: Path) -> None:
+        ws = GitWorkspaces(tmp_path / "ws", remote_url="unused")
+        assert ws.diff_stat("ghost", 1, "main") == ""
+
+
 class TestWorktreeResume:
     def test_later_attempt_continues_from_pushed_branch(self, tmp_path: Path) -> None:
         origin = TestGitWorkspaces()._make_origin(tmp_path)

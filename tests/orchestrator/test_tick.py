@@ -130,6 +130,17 @@ class TestHarvest:
         assert node.blocked_reason is not None
         assert "empty diff" in node.blocked_reason
 
+    def test_clean_exit_branch_pushed_but_empty_diff_escalates(self, h: Harness) -> None:
+        # ADR-0010: exit code, then checks, then a NON-EMPTY diff — a pushed
+        # branch identical to the default branch is still an empty diff.
+        node_id = self._run_to_in_progress(h)
+        h.runner.script_exit(node_id, 1, exit_code=0)
+        h.codehost.branches.add(branch_for(node_id))
+        h.workspaces.diff_stats[(node_id, 1)] = ""
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.ESCALATED
+        assert len(h.codehost.opened) == 0
+
     def test_crash_retries_then_escalates(self, h: Harness) -> None:
         node_id = self._run_to_in_progress(h)
         for attempt in range(1, 4):
@@ -193,7 +204,20 @@ class TestSettle:
         h.orchestrator.tick()
         assert h.state_of("#1") is NodeState.MERGED
         assert h.codehost.merged == [pr]
-        del node_id
+        # ADR-0009: the merge and which checks reported are evented.
+        merged_events = [e for e in h.store.events_after(0) if e.kind == "merged"]
+        assert len(merged_events) == 1
+        assert merged_events[0].node_id == node_id
+        assert merged_events[0].payload["pr"] == pr
+        assert merged_events[0].payload["how"] == "ticketflow"
+        assert merged_events[0].payload["checks"] == [{"name": "ci", "state": "success"}]
+
+    def test_host_side_merge_is_evented_too(self, h: Harness) -> None:
+        _, pr = self._run_to_awaiting(h)
+        h.set_pr(pr, state="merged")
+        h.orchestrator.tick()
+        merged_events = [e for e in h.store.events_after(0) if e.kind == "merged"]
+        assert merged_events[0].payload["how"] == "host"
 
     def test_pending_checks_wait(self, h: Harness) -> None:
         _, pr = self._run_to_awaiting(h)

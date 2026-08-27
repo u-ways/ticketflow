@@ -45,6 +45,17 @@ class GitWorkspaces:
         self._git("worktree", "add", "-B", branch, str(path), start_ref, cwd=self._base)
         return path
 
+    def diff_stat(self, node_id: str, attempt: int, base_branch: str) -> str:
+        """git diff --stat of the attempt's worktree against the base branch.
+
+        Empty output = empty diff (ADR-0010). The worktree's HEAD is the
+        agent's final state, pushed or not.
+        """
+        path = self._root / node_id / str(attempt)
+        if not (path / ".git").exists():
+            return ""
+        return self._git("diff", "--stat", f"origin/{base_branch}...HEAD", cwd=path)
+
     def _ref_exists(self, ref: str) -> bool:
         try:
             self._git("rev-parse", "--verify", "--quiet", ref, cwd=self._base)
