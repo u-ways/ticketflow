@@ -293,6 +293,8 @@ class Orchestrator:
                 blocked_by = None
                 if any(state is not NodeState.MERGED for state in upstream_states):
                     blocked_by = "upstream edges unresolved"
+                elif self._epic_held(node.node_id) is not None:
+                    blocked_by = "decomposed by a plan"
                 elif self._has_escalated_ancestor(node.node_id):
                     blocked_by = "escalated ancestor"
                 elif self._plan_hold_active(node.node_id):
@@ -488,6 +490,21 @@ class Orchestrator:
         if self._store.kv_get(_k_plan_hold(node_id)) is None:
             self._store.kv_set(_k_plan_hold(node_id), plan_id)
             self._store.set_blocked_reason(node_id, f"awaiting plan emission ({plan_id})", now=now)
+
+    def _epic_held(self, node_id: str) -> str | None:
+        """The plan id decomposing this node, when the node IS a planned epic.
+
+        A planned epic is decomposed, not executed (ADR-0014): its children
+        carry the work, so it never dispatches while its plan is anything
+        but discarded.
+        """
+        for ref in self._store.refs_for(node_id):
+            if ref.provider != self._provider_name():
+                continue
+            plan = self._store.latest_plan_for_epic(ref.provider, ref.external_key)
+            if plan is not None and plan.status is not PlanStatus.DISCARDED:
+                return plan.plan_id
+        return None
 
     def _plan_hold_active(self, node_id: str) -> bool:
         """True while the node's emitting plan is not yet complete; clears
@@ -903,6 +920,12 @@ class Orchestrator:
                 continue
             if self._plan_hold_active(node_id):
                 continue
+            if (epic_plan := self._epic_held(node_id)) is not None:
+                node = self._store.get_node(node_id)
+                reason = f"decomposed by plan {epic_plan}"
+                if node and node.blocked_reason != reason:
+                    self._store.set_blocked_reason(node_id, reason, now=now)
+                continue
             self._store.set_state(node_id, NodeState.READY, now=now)
             states[node_id] = NodeState.READY
         for node_id, ancestor in blocked_on_escalated(states, edges).items():
@@ -946,10 +969,10 @@ class Orchestrator:
         node = self._store.get_node(node_id)
         if node is None:
             return
-        if self._plan_hold_active(node_id):
+        if self._plan_hold_active(node_id) or self._epic_held(node_id) is not None:
             # Backstop for any path to READY the guards did not foresee: a
             # marker-held child never dispatches while its plan is not
-            # emitted (ADR-0014).
+            # emitted, and a planned epic never dispatches at all (ADR-0014).
             return
         next_attempt = self._store.bump_attempt_count(node_id, now=now)
         if not self._store.claim_lease(

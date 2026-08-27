@@ -24,7 +24,9 @@
   solely to retract an approval while the emission ledger is still empty;
   an `unblock` intent may release a hold whose plan id the plans table has
   never heard of (a foreign or rebuilt database — there is no emission to
-  wait for); re-planning an emitted epic requires an explicit `--re-plan`.
+  wait for); re-planning an emitted epic requires an explicit `--re-plan`; and a
+  planned epic is decomposed, not executed — the epic node itself never
+  dispatches while its plan is anything but discarded.
 
 ## Context
 
@@ -171,5 +173,7 @@ The planner is a separate, offline phase in front of the scheduler.
 - Flag any `EMITTING → DISCARDED` path that does not verify the emission
   ledger is empty, and any re-plan of an emitted epic without an explicit
   operator opt-in.
+- Flag any path that dispatches a plan's epic node while the plan is live
+  or emitted — a planned epic is decomposed, not executed.
 - Flag plan lifecycle state stored anywhere but `plans.status` — never in
   `nodes.state` (ADR-0006 is untouched by planning).

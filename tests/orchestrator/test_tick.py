@@ -730,3 +730,60 @@ class TestPlannerInterlocks:
         assert node is not None
         assert node.blocked_reason is not None
         assert "awaiting plan emission" in node.blocked_reason
+
+
+class TestEpicHold:
+    """A planned epic is decomposed, not executed (ADR-0014): its children
+    carry the work, so the epic node itself must never dispatch while its
+    plan is live or emitted."""
+
+    def _plan_for_epic(self, h: Harness, status: PlanStatus) -> str:
+        plan_id = "e" * 12
+        h.store.create_plan(plan_id=plan_id, provider="github", epic_key="#200", now=h.clock())
+        order = {
+            PlanStatus.GROUNDING: (PlanStatus.GROUNDING,),
+            PlanStatus.EMITTED: (
+                PlanStatus.GROUNDING,
+                PlanStatus.SYNTHESIS,
+                PlanStatus.IN_REVIEW,
+                PlanStatus.EMITTING,
+                PlanStatus.EMITTED,
+            ),
+            PlanStatus.DISCARDED: (PlanStatus.DISCARDED,),
+        }[status]
+        for step in order:
+            h.store.set_plan_status(plan_id, step, now=h.clock())
+        return plan_id
+
+    def test_epic_with_a_live_plan_never_dispatches(self, h: Harness) -> None:
+        plan_id = self._plan_for_epic(h, PlanStatus.GROUNDING)
+        h.add_item("#200", "The epic")
+        h.orchestrator.tick()
+        h.orchestrator.tick()
+        assert h.state_of("#200") is NodeState.BLOCKED
+        node = h.store.get_node(h.node_id_for("#200"))
+        assert node is not None
+        assert node.blocked_reason == f"decomposed by plan {plan_id}"
+
+    def test_epic_of_an_emitted_plan_stays_held(self, h: Harness) -> None:
+        self._plan_for_epic(h, PlanStatus.EMITTED)
+        h.add_item("#200", "The epic")
+        h.orchestrator.tick()
+        h.orchestrator.tick()
+        assert h.state_of("#200") is NodeState.BLOCKED
+
+    def test_epic_of_a_discarded_plan_is_ordinary_work(self, h: Harness) -> None:
+        self._plan_for_epic(h, PlanStatus.DISCARDED)
+        h.add_item("#200", "The epic")
+        h.orchestrator.tick()
+        assert h.state_of("#200") is NodeState.IN_PROGRESS
+
+    def test_unblock_cannot_release_an_epic_hold(self, h: Harness) -> None:
+        self._plan_for_epic(h, PlanStatus.GROUNDING)
+        h.add_item("#200", "The epic")
+        h.orchestrator.tick()
+        h.store.add_intent(
+            intent_type="unblock", source="cli", node_id=h.node_id_for("#200"), now=h.clock()
+        )
+        h.orchestrator.tick()
+        assert h.state_of("#200") is NodeState.BLOCKED
