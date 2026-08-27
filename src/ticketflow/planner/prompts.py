@@ -32,6 +32,16 @@ plausible dependencies: a missed edge is recoverable in review, a fabricated
 one silently serializes the graph (over-prediction is the known failure
 mode, so propose fewer, better-evidenced edges)."""
 
+OUTPUT_CONTRACT = """\
+Answer with ONLY a JSON object — no prose, no markdown fences — of the form:
+{"items": [{"index": 0, "title": "...", "body": "...", "scope": ["path/"]}],
+ "edges": [{"upstream": 0, "downstream": 1, "confidence": 0.8,
+            "evidence": "quoted or cited source"}],
+ "unevidenced_edges": [], "notes": ""}
+Item indices are contiguous from 0. `scope` and `notes` may be omitted.
+Every entry in `edges` must cite evidence; a proposal without evidence goes
+in `unevidenced_edges`."""
+
 REVISION_INSTRUCTIONS = """\
 You revise an existing plan in response to reviewer feedback. Apply the
 feedback and re-derive its consequences: removing an edge may free items to

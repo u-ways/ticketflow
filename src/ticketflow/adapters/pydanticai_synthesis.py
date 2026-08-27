@@ -18,7 +18,6 @@ lives in :mod:`ticketflow.planner.prompts`, not here.
 
 from collections.abc import Callable
 
-from pydantic import BaseModel
 from pydantic_ai import Agent, ModelRetry
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.models import Model
@@ -30,17 +29,8 @@ from ticketflow.planner.prompts import (
     render_revision_input,
     render_synthesis_input,
 )
-from ticketflow.planner.schema import Plan, PlanEdge, PlanItem
-from ticketflow.planner.synthesis import RevisionRequest, SynthesisRequest
-
-
-class _Draft(BaseModel):
-    """What the model authors: a plan minus the identity the caller owns."""
-
-    items: tuple[PlanItem, ...]
-    edges: tuple[PlanEdge, ...] = ()
-    unevidenced_edges: tuple[PlanEdge, ...] = ()
-    notes: str = ""
+from ticketflow.planner.schema import Plan
+from ticketflow.planner.synthesis import PlanDraft, RevisionRequest, SynthesisRequest
 
 
 class PydanticAISynthesizer:
@@ -83,16 +73,16 @@ class PydanticAISynthesizer:
         )
 
     def _run(self, instructions: str, user_input: str, *, plan_id: str, epic_key: str) -> Plan:
-        agent: Agent[None, _Draft] = Agent(
+        agent: Agent[None, PlanDraft] = Agent(
             self._model,
-            output_type=_Draft,
+            output_type=PlanDraft,
             instructions=instructions,
             retries=self._max_retries,
         )
         validate = self._validate
 
         @agent.output_validator
-        def _valid(draft: _Draft) -> _Draft:
+        def _valid(draft: PlanDraft) -> PlanDraft:
             plan = _assemble(plan_id, epic_key, draft)
             errors = validate(plan)
             if errors:
@@ -108,20 +98,13 @@ class PydanticAISynthesizer:
         return _assemble(plan_id, epic_key, result.output)
 
 
-def _assemble(plan_id: str, epic_key: str, draft: _Draft) -> Plan:
+def _assemble(plan_id: str, epic_key: str, draft: PlanDraft) -> Plan:
     """Attach identity and run the Plan's structural validators.
 
     Inside the output validator a structural failure becomes a ModelRetry;
     at the final assembly the draft has already passed, so this cannot fire.
     """
     try:
-        return Plan(
-            plan_id=plan_id,
-            epic_key=epic_key,
-            items=draft.items,
-            edges=draft.edges,
-            unevidenced_edges=draft.unevidenced_edges,
-            notes=draft.notes,
-        )
+        return draft.assemble(plan_id=plan_id, epic_key=epic_key)
     except ValueError as exc:
         raise ModelRetry(f"the plan failed structural validation: {exc}") from exc

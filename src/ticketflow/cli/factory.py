@@ -104,18 +104,30 @@ def build_planner(
     (ADR-0011); the CLI checks first for a friendlier message.
     """
     from ticketflow.adapters.github_codehost import GitHubCodeHost
-    from ticketflow.adapters.pydanticai_synthesis import PydanticAISynthesizer
     from ticketflow.planner.service import Planner
+    from ticketflow.planner.synthesis import PlanSynthesizer
     from ticketflow.planner.validate import semantic_errors
 
-    if config.planner.synthesis_model is None:
-        raise ValueError("planner.synthesis_model must be set to run the planner")
     codehost = GitHubCodeHost(config.codehost.repo, token=github_token())
-    synthesizer = PydanticAISynthesizer(
-        model=config.planner.synthesis_model,
-        validate=semantic_errors,
-        max_retries=config.planner.synthesis_max_retries,
-    )
+    synthesizer: PlanSynthesizer
+    if config.planner.synthesis_backend == "claude-cli":
+        from ticketflow.adapters.claude_cli_synthesis import ClaudeCliSynthesizer
+
+        synthesizer = ClaudeCliSynthesizer(
+            validate=semantic_errors,
+            model=config.planner.synthesis_model,
+            max_retries=config.planner.synthesis_max_retries,
+        )
+    else:
+        from ticketflow.adapters.pydanticai_synthesis import PydanticAISynthesizer
+
+        if config.planner.synthesis_model is None:
+            raise ValueError("planner.synthesis_model must be set to run the planner")
+        synthesizer = PydanticAISynthesizer(
+            model=config.planner.synthesis_model,
+            validate=semantic_errors,
+            max_retries=config.planner.synthesis_max_retries,
+        )
     return Planner(
         store=store,
         tracker=build_tracker(config),

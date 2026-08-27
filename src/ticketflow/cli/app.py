@@ -294,10 +294,11 @@ def _build_planner_or_exit(
     from ticketflow.cli.factory import build_planner, open_store
 
     cfg = _load(config_path)
-    if cfg.planner.synthesis_model is None:
+    if cfg.planner.synthesis_backend == "pydantic-ai" and cfg.planner.synthesis_model is None:
         typer.echo(
             "planner.synthesis_model is not set. Add it under [planner] in "
-            f"{config_path} — the model always comes from config (ADR-0011).",
+            f"{config_path} — the model always comes from config (ADR-0011) — "
+            'or set synthesis_backend = "claude-cli" to use the CLI default.',
             err=True,
         )
         raise typer.Exit(code=2)

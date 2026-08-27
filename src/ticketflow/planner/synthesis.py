@@ -12,7 +12,29 @@ production implementation is model-backed and lives under
 from dataclasses import dataclass
 from typing import Protocol
 
-from ticketflow.planner.schema import Plan
+from pydantic import BaseModel
+
+from ticketflow.planner.schema import Plan, PlanEdge, PlanItem
+
+
+class PlanDraft(BaseModel):
+    """What a model authors: a plan minus the identity the caller owns."""
+
+    items: tuple[PlanItem, ...]
+    edges: tuple[PlanEdge, ...] = ()
+    unevidenced_edges: tuple[PlanEdge, ...] = ()
+    notes: str = ""
+
+    def assemble(self, *, plan_id: str, epic_key: str) -> Plan:
+        """Attach identity and run the Plan's structural validators."""
+        return Plan(
+            plan_id=plan_id,
+            epic_key=epic_key,
+            items=self.items,
+            edges=self.edges,
+            unevidenced_edges=self.unevidenced_edges,
+            notes=self.notes,
+        )
 
 
 @dataclass(frozen=True, slots=True)

@@ -43,9 +43,13 @@ class RunnerConfig(BaseModel):
 class PlannerConfig(BaseModel):
     """Offline planner settings (ADR-0014)."""
 
+    synthesis_backend: Literal["pydantic-ai", "claude-cli"] = "pydantic-ai"
+    """How synthesis reaches a model: the pydantic-ai API loop, or the
+    headless Claude CLI (the runner's auth story, ADR-0011 — no API key)."""
     synthesis_model: str | None = None
-    """Model for the synthesis phase; required to run `plan new` (ADR-0011:
-    models come from config, never hardcoded)."""
+    """Model for the synthesis phase; required for the pydantic-ai backend
+    (ADR-0011: models come from config, never hardcoded). The claude-cli
+    backend falls back to the CLI default."""
     grounding_model: str | None = None
     """Model for the grounding agent; None uses the runner default."""
     grounding_allowed_tools: tuple[str, ...] = ("Read", "Grep", "Glob")
