@@ -1,10 +1,14 @@
 # The ticketflow demo
 
-A reproducible end-to-end demo: seed a tracker with a four-ticket dependency
-graph (the "qacalc" epic — a diamond: one root, two parallel arms, one tip),
-point ticketflow at it, and watch agents take every ticket from Backlog to
-Merged. The same epic ran the project's first live QA and completed 4/4 with
-zero escalations.
+Two reproducible demos against a sandbox repo, one epic either way:
+
+- **The planner demo** (the showcase, ADR-0014): seed ONE underspecified
+  epic, let the planner ground it, propose a decomposition with per-edge
+  confidence and evidence, review and approve it, emit real child tickets —
+  then watch the orchestrator execute the graph the planner wrote.
+- **The pre-wired demo** (the quick path): seed the four-ticket qacalc
+  diamond directly and go straight to execution. This is the epic that ran
+  the project's first live QA, 4/4 merged with zero escalations.
 
 ```
 scaffold ──┬── operations ──┐
@@ -23,24 +27,55 @@ scaffold ──┬── operations ──┐
 - For the Jira flavour: `ATLASSIAN_EMAIL` and `ATLASSIAN_API_TOKEN` exported,
   and a project whose issue type `Task` exists.
 
-## 1. Seed the tracker
+## 1a. The planner demo (showcase)
 
-GitHub Issues (optionally mirrored onto a Projects v2 board):
+Seed one deliberately underspecified epic:
+
+```sh
+just demo seed-epic-github --repo u-ways/ticketflow-qa-sandbox \
+    --project-owner u-ways --project-number 5
+# or: just demo seed-epic-jira --base-url https://u-ways.atlassian.net --project KAN
+```
+
+Add a `[planner]` section to the config below, then decompose it. With a
+Claude subscription and no API key, use the CLI synthesis backend:
+
+```toml
+[planner]
+synthesis_backend = "claude-cli"   # pydantic-ai + synthesis_model needs ANTHROPIC_API_KEY
+grounding_model = "sonnet"
+synthesis_model = "sonnet"
+```
+
+```sh
+uv run ticketflow plan new "#N"              # ground the epic, propose a plan
+uv run ticketflow plan show "#N"             # items; edges ascending by confidence
+uv run ticketflow plan revise "#N" --feedback "Split the CLI into its own item."
+uv run ticketflow plan edit "#N"             # or hand-edit plans/<epic>.yaml in $EDITOR
+uv run ticketflow plan approve "#N"
+uv run ticketflow plan emit "#N"             # child tickets appear, wired with depends-on
+```
+
+(`plan new "#N" --yolo` collapses all of that into one command — grounding,
+synthesis, auto-approval, emission.) Review is mostly pruning: edges print
+least-evidenced first, and unevidenced proposals are listed apart. The
+emitted children carry `tf-plan-<plan-id>` labels, real `depends-on:` lines,
+and sub-issue/link mirrors; from here the run step below executes them like
+any human-authored graph.
+
+## 1b. The pre-wired demo (quick path)
+
+Seed the four-ticket diamond directly — created in dependency order so each
+`depends-on:` line references the real numbers/keys the tracker assigned:
 
 ```sh
 just demo seed-github --repo u-ways/ticketflow-qa-sandbox \
     --project-owner u-ways --project-number 5
+# or: just demo seed-jira --base-url https://u-ways.atlassian.net --project KAN
 ```
 
-Jira:
-
-```sh
-just demo seed-jira --base-url https://u-ways.atlassian.net --project KAN
-```
-
-Issues are created in dependency order so each `depends-on:` line references
-the real numbers/keys the tracker just assigned, and every issue carries the
-`tf-demo` label so reset can find them later.
+Everything seeded either way carries the `tf-demo` label (children of a plan
+carry its `tf-plan-*` label) so reset can find it all later.
 
 ## 2. Configure and run
 
@@ -124,5 +159,9 @@ Two things reset deliberately leaves alone:
 
 - **Projects v2 board items** for closed issues stay on the board; archive
   them from the board UI (or leave them — the next seed adds fresh items).
+
+Reset also closes planner-emitted children (`tf-plan-*` labels on GitHub, the
+body marker on Jira). The `plans/` working copies are the reviewed artifacts
+and are left in place; a new plan for the same epic key overwrites its file.
 
 Re-seeding after a reset gives you a clean, repeatable demo loop.
