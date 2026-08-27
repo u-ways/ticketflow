@@ -1,0 +1,367 @@
+"""Lifecycle tests for the reconcile tick (ADR-0008), through fakes only."""
+
+from ticketflow.domain.model import NodeState
+from ticketflow.orchestrator.core import branch_for, derive_node_id
+from ticketflow.ports.codehost import CheckState, ReviewDecision
+from ticketflow.ports.runner import AttemptStatus, FailureClass, PollResult
+
+from .conftest import Harness
+
+
+class TestSync:
+    def test_new_items_become_blocked_nodes(self, h: Harness) -> None:
+        h.add_item("#1", "First")
+        h.add_item("#2", "Second", body="depends-on: #1")
+        h.orchestrator.tick()
+        node2 = h.store.get_node(h.node_id_for("#2"))
+        assert node2 is not None
+        assert h.store.upstreams_of(node2.node_id) == (h.node_id_for("#1"),)
+
+    def test_closed_item_syncs_as_merged(self, h: Harness) -> None:
+        h.add_item("#1", "Already done", closed=True)
+        h.add_item("#2", "Next", body="depends-on: #1")
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.MERGED
+        # And its dependent became ready and was dispatched.
+        assert h.state_of("#2") is NodeState.IN_PROGRESS
+
+    def test_unresolved_dependency_recorded(self, h: Harness) -> None:
+        h.add_item("#1", "Depends on a ghost", body="depends-on: #99")
+        h.orchestrator.tick()
+        kinds = [e.kind for e in h.store.events_after(0)]
+        assert "dependency_unresolved" in kinds
+
+    def test_cycle_stops_scheduling_not_the_tick(self, h: Harness) -> None:
+        h.add_item("#1", "A", body="depends-on: #2")
+        h.add_item("#2", "B", body="depends-on: #1")
+        report = h.orchestrator.tick()
+        assert report.graph_ok is False
+        assert report.dispatched == 0
+        assert h.state_of("#1") is NodeState.BLOCKED
+
+    def test_resync_updates_content(self, h: Harness) -> None:
+        h.add_item("#1", "Old title")
+        h.orchestrator.tick()
+        h.tracker.items.clear()
+        h.add_item("#1", "New title")
+        h.orchestrator.tick()
+        node = h.store.get_node(h.node_id_for("#1"))
+        assert node is not None
+        assert node.title == "New title"
+
+    def test_node_id_is_deterministic(self, h: Harness) -> None:
+        h.add_item("#1", "One")
+        h.orchestrator.tick()
+        assert h.node_id_for("#1") == derive_node_id("github", "#1")
+
+
+class TestDispatch:
+    def test_ready_node_is_leased_and_started(self, h: Harness) -> None:
+        h.add_item("#1", "Work")
+        report = h.orchestrator.tick()
+        assert report.dispatched == 1
+        assert h.state_of("#1") is NodeState.IN_PROGRESS
+        node_id = h.node_id_for("#1")
+        assert h.store.get_lease(node_id) is not None
+        assert len(h.runner.started) == 1
+        started = h.runner.started[0]
+        assert branch_for(node_id) in started.dispatch.prompt
+        attempt = h.store.get_attempt(node_id, 1)
+        assert attempt is not None
+        assert attempt.pid is not None
+
+    def test_max_parallel_caps_dispatch(self, h: Harness) -> None:
+        for i in range(1, 5):
+            h.add_item(f"#{i}", f"Work {i}")
+        report = h.orchestrator.tick()
+        assert report.dispatched == 2  # limits.max_parallel
+
+    def test_yolo_flag_reaches_policy_and_event_log(self, h: Harness) -> None:
+        from ticketflow.orchestrator.core import Orchestrator
+
+        yolo_orch = Orchestrator(
+            store=h.store,
+            tracker=h.tracker,
+            runner=h.runner,
+            codehost=h.codehost,
+            workspaces=h.workspaces,
+            config=h.config,
+            clock=h.clock,
+            yolo=True,
+        )
+        h.add_item("#1", "Work")
+        yolo_orch.tick()
+        assert h.runner.started[0].policy.yolo is True
+        dispatch_events = [e for e in h.store.events_after(0) if e.kind == "dispatched"]
+        assert dispatch_events[0].payload["yolo"] is True
+
+
+class TestHarvest:
+    def _run_to_in_progress(self, h: Harness, key: str = "#1") -> str:
+        h.add_item(key, "Work")
+        h.orchestrator.tick()
+        return h.node_id_for(key)
+
+    def test_clean_exit_with_branch_opens_pr(self, h: Harness) -> None:
+        node_id = self._run_to_in_progress(h)
+        h.runner.script_exit(node_id, 1, exit_code=0)
+        h.codehost.branches.add(branch_for(node_id))
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.AWAITING_SIGNALS
+        assert len(h.codehost.opened) == 1
+
+    def test_handoff_collected_and_posted(self, h: Harness) -> None:
+        node_id = self._run_to_in_progress(h)
+        workspace = h.workspaces.prepare(node_id, 1, bootstrap=False)
+        (workspace / "handoff.md").write_text("Touched src/x. Gotcha: y.")
+        h.runner.script_exit(node_id, 1, exit_code=0)
+        h.codehost.branches.add(branch_for(node_id))
+        h.orchestrator.tick()
+        assert h.store.get_handoff(node_id) == "Touched src/x. Gotcha: y."
+        assert any("Touched src/x" in text for _, text in h.codehost.comments)
+
+    def test_clean_exit_empty_diff_escalates(self, h: Harness) -> None:
+        node_id = self._run_to_in_progress(h)
+        h.runner.script_exit(node_id, 1, exit_code=0)  # no branch pushed
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.ESCALATED
+        node = h.store.get_node(node_id)
+        assert node is not None
+        assert node.blocked_reason is not None
+        assert "empty diff" in node.blocked_reason
+
+    def test_crash_retries_then_escalates(self, h: Harness) -> None:
+        node_id = self._run_to_in_progress(h)
+        for attempt in range(1, 4):
+            h.runner.script_exit(node_id, attempt, exit_code=1)
+            h.orchestrator.tick()
+        # attempts 1 and 2 crash back to Ready and re-dispatch; the third
+        # crash hits max_attempts=3 and escalates.
+        assert h.state_of("#1") is NodeState.ESCALATED
+
+    def test_timeout_cancels_and_escalates(self, h: Harness) -> None:
+        node_id = self._run_to_in_progress(h)
+        h.runner.script(node_id, 1, PollResult(status=AttemptStatus.TIMED_OUT))
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.ESCALATED
+        assert len(h.runner.cancelled) == 1
+
+    def test_quota_failure_pauses_dispatch(self, h: Harness) -> None:
+        node_id = self._run_to_in_progress(h)
+        h.add_item("#2", "More work")
+        h.runner.script(
+            node_id,
+            1,
+            PollResult(status=AttemptStatus.EXITED, exit_code=1, failure_class=FailureClass.QUOTA),
+        )
+        report = h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.ESCALATED
+        assert report.dispatched == 0  # #2 was ready but dispatch is paused
+        assert any("paused" in n for n in report.notes)
+        # A global resume intent clears the pause.
+        h.store.add_intent(intent_type="resume", source="cli", now=h.clock())
+        report = h.orchestrator.tick()
+        assert report.dispatched == 1
+
+    def test_bootstrap_completes_on_push(self, h: Harness) -> None:
+        h.codehost.exists = False
+        h.add_item("#1", "Create the repo")
+        h.orchestrator.tick()
+        assert h.workspaces.bootstrap_requests == [(h.node_id_for("#1"), 1)]
+        assert "does not exist yet" in h.runner.started[0].dispatch.prompt
+        h.codehost.exists = True  # the agent created and pushed it
+        h.runner.script_exit(h.node_id_for("#1"), 1, exit_code=0)
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.MERGED
+
+
+class TestSettle:
+    def _run_to_awaiting(self, h: Harness, key: str = "#1") -> tuple[str, int]:
+        h.add_item(key, "Work")
+        h.orchestrator.tick()
+        node_id = h.node_id_for(key)
+        h.runner.script_exit(node_id, 1, exit_code=0)
+        h.codehost.branches.add(branch_for(node_id))
+        h.orchestrator.tick()
+        pr = h.codehost.find_pr_for_branch(branch_for(node_id))
+        assert pr is not None
+        return node_id, pr
+
+    def test_green_no_gates_merges_immediately(self, h: Harness) -> None:
+        node_id, pr = self._run_to_awaiting(h)
+        h.set_pr(pr, checks={"ci": CheckState.SUCCESS})
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.MERGED
+        assert h.codehost.merged == [pr]
+        del node_id
+
+    def test_pending_checks_wait(self, h: Harness) -> None:
+        _, pr = self._run_to_awaiting(h)
+        h.set_pr(pr, checks={"ci": CheckState.PENDING})
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.AWAITING_SIGNALS
+        assert h.codehost.merged == []
+
+    def test_failed_check_reruns_once_before_feedback(self, h: Harness) -> None:
+        _, pr = self._run_to_awaiting(h)
+        h.set_pr(pr, checks={"ci": CheckState.FAILURE})
+        h.orchestrator.tick()
+        assert h.codehost.reruns == [pr]
+        assert h.state_of("#1") is NodeState.AWAITING_SIGNALS  # not yet feedback
+        # Check passes after the re-run: recorded as a flake, then merged.
+        h.set_pr(pr, checks={"ci": CheckState.SUCCESS})
+        h.orchestrator.tick()
+        assert h.store.flake_rate("ci") == 1.0
+        assert h.state_of("#1") is NodeState.MERGED
+
+    def test_persistent_failure_dispatches_feedback(self, h: Harness) -> None:
+        node_id, pr = self._run_to_awaiting(h)
+        h.set_pr(pr, checks={"ci": CheckState.FAILURE})
+        h.orchestrator.tick()  # re-run consumed
+        h.orchestrator.tick()  # still red: feedback cycle
+        assert h.state_of("#1") is NodeState.ADDRESSING_FEEDBACK
+        assert len(h.runner.resumed) == 1
+        _, feedback = h.runner.resumed[0]
+        assert "ci" in feedback
+        assert h.store.flake_rate("ci") == 0.0
+        # The agent pushes a fix and exits; back to AwaitingSignals; goes green.
+        h.runner.script_exit(node_id, 2, exit_code=0)
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.AWAITING_SIGNALS
+        h.set_pr(pr, checks={"ci": CheckState.SUCCESS})
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.MERGED
+
+    def test_unresolved_threads_block_merge_and_carry_comments(self, h: Harness) -> None:
+        from ticketflow.ports.codehost import ReviewComment
+
+        _, pr = self._run_to_awaiting(h)
+        h.set_pr(pr, checks={"ci": CheckState.SUCCESS}, threads=1)
+        h.codehost.prs[pr].feedback.append(
+            ReviewComment(thread_id="t1", author="reviewer", body="Rename this.", path="a.py")
+        )
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.ADDRESSING_FEEDBACK
+        _, feedback = h.runner.resumed[0]
+        assert "Rename this." in feedback
+
+    def test_cycle_cap_escalates(self, h: Harness) -> None:
+        h.config.limits.cycle_cap = 1
+        node_id, pr = self._run_to_awaiting(h)
+        h.set_pr(pr, checks={"ci": CheckState.FAILURE})
+        h.orchestrator.tick()  # rerun
+        h.orchestrator.tick()  # cycle 1: feedback dispatch
+        h.runner.script_exit(node_id, 2, exit_code=0)
+        h.orchestrator.tick()  # back to awaiting
+        h.orchestrator.tick()  # rerun for cycle 2's failure window
+        h.orchestrator.tick()  # cycle 2 > cap: escalate
+        assert h.state_of("#1") is NodeState.ESCALATED
+
+    def test_approvals_missing_sets_auto_merge(self, h: Harness) -> None:
+        _, pr = self._run_to_awaiting(h)
+        h.codehost.merge_result = False
+        h.codehost.auto_merge_result = True
+        h.set_pr(pr, checks={"ci": CheckState.SUCCESS}, decision=ReviewDecision.REVIEW_REQUIRED)
+        h.orchestrator.tick()
+        assert h.codehost.auto_merged == [pr]
+        assert h.state_of("#1") is NodeState.AWAITING_SIGNALS
+
+    def test_externally_merged_pr_is_recognized(self, h: Harness) -> None:
+        _, pr = self._run_to_awaiting(h)
+        h.set_pr(pr, state="merged")
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.MERGED
+
+
+class TestIntents:
+    def test_cancel_running_node(self, h: Harness) -> None:
+        h.add_item("#1", "Work")
+        h.orchestrator.tick()
+        node_id = h.node_id_for("#1")
+        h.store.add_intent(intent_type="cancel", source="cli", node_id=node_id, now=h.clock())
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.ESCALATED
+        assert len(h.runner.cancelled) == 1
+
+    def test_retry_escalated_with_feedback(self, h: Harness) -> None:
+        h.add_item("#1", "Work")
+        h.orchestrator.tick()
+        node_id = h.node_id_for("#1")
+        h.runner.script_exit(node_id, 1, exit_code=0)  # empty diff -> escalate
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.ESCALATED
+        h.store.add_intent(
+            intent_type="retry",
+            source="cli",
+            node_id=node_id,
+            payload={"feedback": "The acceptance criteria mean X, not Y."},
+            now=h.clock(),
+        )
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.IN_PROGRESS
+        node = h.store.get_node(node_id)
+        assert node is not None
+        assert node.attempt_count == 1  # counters were reset before re-dispatch
+        prompt = h.runner.started[-1].dispatch.prompt
+        assert "The acceptance criteria mean X, not Y." in prompt
+
+    def test_unknown_intent_recorded_not_crashing(self, h: Harness) -> None:
+        h.store.add_intent(intent_type="approve-plan", source="cli", now=h.clock())
+        h.orchestrator.tick()
+        kinds = [e.kind for e in h.store.events_after(0)]
+        assert "intent_unhandled" in kinds
+
+    def test_tracker_intents_are_ingested_idempotently(self, h: Harness) -> None:
+        from ticketflow.ports.tracker import TrackerIntent
+
+        h.add_item("#1", "Work")
+        h.tracker.intents.append(
+            TrackerIntent(external_id="gh:evt-1", intent_type="cancel", external_key="#1")
+        )
+        h.orchestrator.tick()
+        h.orchestrator.tick()  # same intent fetched again; must not reapply
+        cancels = [
+            e
+            for e in h.store.events_after(0)
+            if e.kind == "state_changed" and e.payload.get("to") == "escalated"
+        ]
+        assert len(cancels) == 1
+
+
+class TestProjectionAndHalt:
+    def test_states_are_projected_to_the_tracker(self, h: Harness) -> None:
+        h.add_item("#1", "Work")
+        h.orchestrator.tick()
+        assert ("#1", NodeState.READY) in h.tracker.pushed_states
+        assert ("#1", NodeState.IN_PROGRESS) in h.tracker.pushed_states
+
+    def test_escalation_comment_is_posted(self, h: Harness) -> None:
+        h.add_item("#1", "Work")
+        h.orchestrator.tick()
+        h.runner.script_exit(h.node_id_for("#1"), 1, exit_code=0)
+        h.orchestrator.tick()
+        assert any("Escalated" in text for _, text in h.tracker.comments)
+
+    def test_dependents_of_escalated_show_root_cause(self, h: Harness) -> None:
+        h.add_item("#1", "Base")
+        h.add_item("#2", "On top", body="depends-on: #1")
+        h.orchestrator.tick()
+        node1 = h.node_id_for("#1")
+        h.runner.script_exit(node1, 1, exit_code=0)  # empty diff -> escalated
+        h.orchestrator.tick()
+        node2 = h.store.get_node(h.node_id_for("#2"))
+        assert node2 is not None
+        assert node2.blocked_reason == f"blocked by escalated {node1}"
+
+    def test_halt_after_idle_ticks_with_escalations(self, h: Harness) -> None:
+        h.add_item("#1", "Work")
+        h.orchestrator.tick()
+        h.runner.script_exit(h.node_id_for("#1"), 1, exit_code=0)
+        h.orchestrator.tick()  # escalates (empty diff)
+        reports = [h.orchestrator.tick() for _ in range(3)]  # halt_ticks=3
+        assert reports[-1].halted is True
+
+    def test_no_halt_while_work_flows(self, h: Harness) -> None:
+        h.add_item("#1", "Work")
+        report = h.orchestrator.tick()
+        assert report.halted is False

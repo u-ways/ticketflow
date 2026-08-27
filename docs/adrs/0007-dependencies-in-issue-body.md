@@ -2,6 +2,9 @@
 
 - Status: Accepted
 - Date: 2026-08-27
+- Revision 2026-08-27: writing native-link mirrors (Jira links, GitHub
+  sub-issues) is deferred past M1. The body remains the only read source
+  either way; the mirror is cosmetic and can land later without core changes.
 
 ## Context
 
