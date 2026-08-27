@@ -364,6 +364,20 @@ class TestIntents:
         kinds = [e.kind for e in h.store.events_after(0)]
         assert "intent_unhandled" in kinds
 
+    def test_unblock_refused_while_upstream_unfinished(self, h: Harness) -> None:
+        # ADR-0006: Blocked -> Ready fires only when all upstream edges are
+        # resolved; unblock enforces the SAME guard, so it cannot start a
+        # node on top of unfinished upstream work.
+        h.add_item("#1", "Base")
+        h.add_item("#2", "On top", body="depends-on: #1")
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.IN_PROGRESS
+        h.store.add_intent(
+            intent_type="unblock", source="cli", node_id=h.node_id_for("#2"), now=h.clock()
+        )
+        h.orchestrator.tick()
+        assert h.state_of("#2") is NodeState.BLOCKED
+
     def test_unblock_overrides_unresolved_external_dependency(self, h: Harness) -> None:
         # The legitimate use: a dependency key that resolves to nothing (typo,
         # foreign project) keeps a node Blocked; a human may override that.

@@ -232,9 +232,21 @@ class Orchestrator:
                 self._store.set_state(node.node_id, NodeState.READY, now=now)
                 return
             if kind == "unblock" and node.state is NodeState.BLOCKED:
-                if self._has_escalated_ancestor(node.node_id):
-                    # Never let dependents of an Escalated node proceed
-                    # (ADR-0006) — not even by operator override.
+                # Blocked -> Ready keeps its ADR-0006 guard even under an
+                # operator override: every stored upstream edge must be
+                # resolved, and no ancestor may be Escalated. What unblock
+                # overrides is only the unresolved-key hold (ADR-0007).
+                upstream_states = [
+                    upstream_node.state
+                    for upstream in self._store.upstreams_of(node.node_id)
+                    if (upstream_node := self._store.get_node(upstream)) is not None
+                ]
+                blocked_by = None
+                if any(state is not NodeState.MERGED for state in upstream_states):
+                    blocked_by = "upstream edges unresolved"
+                elif self._has_escalated_ancestor(node.node_id):
+                    blocked_by = "escalated ancestor"
+                if blocked_by:
                     self._store.append_event(
                         "intent_unhandled",
                         now=now,
@@ -242,7 +254,7 @@ class Orchestrator:
                         payload={
                             "type": kind,
                             "source": intent.source,
-                            "reason": "escalated ancestor",
+                            "reason": blocked_by,
                         },
                     )
                     return
