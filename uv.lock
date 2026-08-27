@@ -893,6 +893,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "types-psutil" },
 ]
 
 [package.metadata]
@@ -910,6 +911,7 @@ dev = [
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "ruff", specifier = ">=0.16.4" },
+    { name = "types-psutil", specifier = ">=7.2.2.20260518" },
 ]
 
 [[package]]
@@ -925,6 +927,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ae/40/4a3db7990d1f62a53182aa96eaef57aeb2886a27f90a195bc66713565d31/typer-0.27.1.tar.gz", hash = "sha256:a79bef8469a79c45498e7b814ecf8d603cc7644e9acbd9e19cac0334240b18df", size = 203994, upload-time = "2026-08-03T14:41:03.438Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/43/89/9518bc0c3929bee36b3a4a8e3daddd6e03f92f9961c66d4983b837160543/typer-0.27.1-py3-none-any.whl", hash = "sha256:53150287edd11baeb4e4722c8e394fcdf8181c0ae89485cba8d25c778d5edd56", size = 122874, upload-time = "2026-08-03T14:41:04.391Z" },
+]
+
+[[package]]
+name = "types-psutil"
+version = "7.2.2.20260518"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cb/f1/6901857281d4e8d792492e1495eef6f4f01318a3b6a066486d81000a4511/types_psutil-7.2.2.20260518.tar.gz", hash = "sha256:9f825f631463a5b4d26f19f63aebc9ec25f01140d655026f3ad8a67841f9b331", size = 26660, upload-time = "2026-05-18T06:05:09.389Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cd/eb/f726339668879819599c74c2e1f0cab760912a4159046942bdae2ad37bd6/types_psutil-7.2.2.20260518-py3-none-any.whl", hash = "sha256:6a3d697665754a60d7b5a41d5a2cff12b53f5e0676d77810cd28ba5e14cb4049", size = 32820, upload-time = "2026-05-18T06:05:08.321Z" },
 ]
 
 [[package]]

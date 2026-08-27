@@ -603,3 +603,19 @@ class Store:
         if row is None or row["runs"] == 0:
             return 0.0
         return float(row["flakes"]) / float(row["runs"])
+
+    # -- kv bookkeeping (migration 2) --------------------------------------
+
+    def kv_get(self, key: str) -> str | None:
+        row = self._conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+        return str(row["value"]) if row else None
+
+    def kv_set(self, key: str, value: str) -> None:
+        self._conn.execute(
+            "INSERT INTO kv (key, value) VALUES (?, ?)"
+            " ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+    def kv_delete(self, key: str) -> None:
+        self._conn.execute("DELETE FROM kv WHERE key = ?", (key,))

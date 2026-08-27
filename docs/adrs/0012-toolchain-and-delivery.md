@@ -2,6 +2,9 @@
 
 - Status: Accepted
 - Date: 2026-08-27
+- Revision 2026-08-27: dev-group additions that only support the gates
+  themselves — typing stubs (`types-*`) and similar zero-runtime tooling —
+  are routine and need no ADR amendment; runtime dependencies always do.
 
 ## Context
 
@@ -52,6 +55,10 @@ regression test that fails without the fix.
 **Branch protection.** `main` requires the `quality`, `test` and `adr-review`
 status checks, requires conversation resolution, accepts changes only via pull
 request, and is enforced for admins. Merges are squash merges.
+
+Dev-group additions that only support the gates themselves — typing stubs
+(`types-*`) and similar zero-runtime tooling — are routine and need no ADR
+amendment (revision above); runtime dependencies always do (ADR-0001).
 
 **Pinning.** Per spec §15.4: `githubkit` and the agent SDK/CLI packages
 (`claude-agent-sdk`, `github-copilot-sdk`) are pinned exactly — they move fast

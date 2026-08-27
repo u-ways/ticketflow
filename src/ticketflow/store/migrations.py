@@ -95,6 +95,14 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE INDEX idx_events_node ON events(node_id);
     CREATE INDEX idx_intents_pending ON intents(processed_at) WHERE processed_at IS NULL;
     """,
+    # 2: orchestrator bookkeeping — sync/projection cursors, dispatch pause,
+    # pending feedback, per-node flags. Values are opaque strings.
+    """
+    CREATE TABLE kv (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    """,
 )
 
 
