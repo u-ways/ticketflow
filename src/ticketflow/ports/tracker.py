@@ -48,7 +48,8 @@ class TrackerCapabilities:
 
 
 class TrackerPort(Protocol):
-    """Vendor-neutral tracker interface (spec §7.1)."""
+    """Vendor-neutral tracker interface (spec §7.1; widened for plan
+    emission by the ADR-0002 revision alongside ADR-0014)."""
 
     def fetch_nodes(self, cursor: str | None) -> tuple[list[TrackerItem], str | None]:
         """Canonical items changed since the cursor; returns the next cursor."""
@@ -64,6 +65,36 @@ class TrackerPort(Protocol):
 
     def push_comment(self, external_key: str, text: str) -> None:
         """Post a comment on the tracker item."""
+        ...
+
+    def create_item(
+        self,
+        title: str,
+        body: str,
+        labels: tuple[str, ...] = (),
+        parent_key: str | None = None,
+    ) -> str:
+        """Create a tracker item; returns its tracker-native external key.
+
+        Plan emission only (ADR-0014). Translation, no idempotency logic:
+        the caller owns the emission ledger and the adoption sweep.
+        ``parent_key`` is a cosmetic hierarchy mirror (GitHub sub-issues),
+        best-effort like every mirror; backends without one ignore it.
+        """
+        ...
+
+    def update_body(self, external_key: str, body: str) -> None:
+        """Replace the item's body. Emission phase 2 writes ``depends-on:``
+        lines only after every item's key exists (items before edges)."""
+        ...
+
+    def mirror_dependencies(self, external_key: str, depends_on: tuple[str, ...]) -> None:
+        """Write the backend's native dependency mirror (ADR-0007).
+
+        Write-only and cosmetic: Jira ``is blocked by`` links, GitHub
+        relationships or a board-field convention. Never read as truth; a
+        backend with nothing to mirror onto may no-op.
+        """
         ...
 
     def capabilities(self) -> TrackerCapabilities: ...

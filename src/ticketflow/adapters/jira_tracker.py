@@ -98,6 +98,7 @@ class JiraTracker:
         if not config.project_key:
             raise ValueError("jira tracker requires tracker.project_key")
         self._project_key = config.project_key
+        self._issue_type = config.issue_type
         self._client: Any = (
             client if client is not None else _build_client(config, email, api_token)
         )
@@ -184,6 +185,46 @@ class JiraTracker:
         """Post a comment on the issue."""
         self._add_comment(external_key, text)
 
+    def create_item(
+        self,
+        title: str,
+        body: str,
+        labels: tuple[str, ...] = (),
+        parent_key: str | None = None,
+    ) -> str:
+        """Create an issue for plan emission (ADR-0014); returns its key.
+
+        ``parent_key`` is ignored: Jira parent/epic linking varies by
+        project type and is not mirrored in this slice.
+        """
+        del parent_key
+        fields: dict[str, Any] = {
+            "project": {"key": self._project_key},
+            "summary": title,
+            "description": body,
+            "issuetype": {"name": self._issue_type},
+        }
+        if labels:
+            fields["labels"] = list(labels)
+        created = self._create_issue(fields)
+        return str(created["key"])
+
+    def update_body(self, external_key: str, body: str) -> None:
+        """Replace the description (emission phase 2: depends-on lines)."""
+        self._update_description(external_key, body)
+
+    def mirror_dependencies(self, external_key: str, depends_on: tuple[str, ...]) -> None:
+        """Mirror ``depends-on`` as native ``is blocked by`` links (ADR-0007).
+
+        Write-only and cosmetic; the body stays the only read source. For
+        the ``Blocks`` link type the inward issue *is blocked by* the
+        outward one, so the child is inward and each upstream is outward.
+        Jira treats re-creating an existing link as a no-op, which keeps a
+        retried mirror harmless.
+        """
+        for key in depends_on:
+            self._create_issue_link(inward_key=external_key, outward_key=key)
+
     def capabilities(self) -> TrackerCapabilities:
         """Jira has native links, workflow statuses, and comments (spec §7.1)."""
         return TrackerCapabilities(
@@ -224,6 +265,21 @@ class JiraTracker:
 
     def _add_comment(self, key: str, text: str) -> None:
         self._client.issue_add_comment(key, text)
+
+    def _create_issue(self, fields: dict[str, Any]) -> dict[str, Any]:
+        return cast("dict[str, Any]", self._client.issue_create(fields=fields) or {})
+
+    def _update_description(self, key: str, body: str) -> None:
+        self._client.update_issue_field(key, {"description": body})
+
+    def _create_issue_link(self, *, inward_key: str, outward_key: str) -> None:
+        self._client.create_issue_link(
+            {
+                "type": {"name": "Blocks"},
+                "inwardIssue": {"key": inward_key},
+                "outwardIssue": {"key": outward_key},
+            }
+        )
 
 
 def _build_client(config: TrackerConfig, email: str, api_token: str) -> Any:

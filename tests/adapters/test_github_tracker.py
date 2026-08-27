@@ -43,6 +43,7 @@ def _issue(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         number=number,
+        id=number * 1000,  # database id, distinct from the issue number
         title=title,
         body=body,
         state=state,
@@ -80,6 +81,9 @@ class StubIssuesApi:
         self.added_labels: list[tuple[int, tuple[str, ...]]] = []
         self.updates: list[dict[str, Any]] = []
         self.comments: list[tuple[int, str]] = []
+        self.creates: list[dict[str, Any]] = []
+        self.issues_by_number: dict[int, Any] = {}
+        self.next_created_number = 101
 
     def list_for_repo(self, owner: str, repo: str, **kwargs: Any) -> StubResponse:
         self.list_calls.append({"owner": owner, "repo": repo, **kwargs})
@@ -91,8 +95,14 @@ class StubIssuesApi:
         page = int(kwargs["page"])
         return StubResponse(self.event_pages[page - 1] if page <= len(self.event_pages) else [])
 
-    def get(self, _owner: str, _repo: str, _issue_number: int) -> StubResponse:
-        return StubResponse(self.issue)
+    def get(self, _owner: str, _repo: str, issue_number: int) -> StubResponse:
+        return StubResponse(self.issues_by_number.get(issue_number, self.issue))
+
+    def create(self, owner: str, repo: str, **kwargs: Any) -> StubResponse:
+        self.creates.append({"owner": owner, "repo": repo, **kwargs})
+        created = _issue(self.next_created_number, title=kwargs.get("title", ""))
+        self.next_created_number += 1
+        return StubResponse(created)
 
     def create_label(self, _owner: str, _repo: str, *, name: str, color: str) -> None:
         self.created_labels.append((name, color))
@@ -120,6 +130,8 @@ class StubGraphQL:
         self.org_response: Any = None
         self.user_response: Any = None
         self.items_response: Any = None
+        self.blocked_org_response: Any = None
+        self.blocked_user_response: Any = None
         self.mutations: list[dict[str, Any]] = []
 
     def __call__(self, query: str, variables: dict[str, Any] | None = None) -> Any:
@@ -129,6 +141,10 @@ class StubGraphQL:
             return {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "item"}}}
         if "projectItems" in query:
             return self._resolve(self.items_response)
+        if 'field(name: "Blocked by")' in query:
+            if "organization(" in query:
+                return self._resolve(self.blocked_org_response)
+            return self._resolve(self.blocked_user_response)
         if "organization(" in query:
             return self._resolve(self.org_response)
         return self._resolve(self.user_response)
@@ -149,6 +165,13 @@ class StubClient:
         self.issues = StubIssuesApi()
         self.rest = SimpleNamespace(issues=self.issues)
         self.graphql = StubGraphQL()
+        self.requests: list[tuple[str, str, dict[str, Any] | None]] = []
+        self.request_error: Exception | None = None
+
+    def request(self, method: str, url: str, json: dict[str, Any] | None = None) -> None:
+        self.requests.append((method, url, json))
+        if self.request_error is not None:
+            raise self.request_error
 
 
 def org_project_payload(options: list[tuple[str, str]]) -> dict[str, Any]:
@@ -479,10 +502,88 @@ class TestCapabilities:
     def test_without_project_board(self) -> None:
         tracker, _ = make_tracker()
         caps = tracker.capabilities()
-        assert not caps.native_dependency_links
+        # Native blocked-by relationships went GA in 2025 (ADR-0002 revision).
+        assert caps.native_dependency_links
         assert not caps.custom_state_field
         assert caps.supports_comments
 
     def test_with_project_board(self) -> None:
         tracker, _ = make_tracker(project=True)
         assert tracker.capabilities().custom_state_field
+
+
+def blocked_field_payload(owner_kind: str = "organization") -> dict[str, Any]:
+    return {owner_kind: {"projectV2": {"id": "P1", "field": {"id": "FB"}}}}
+
+
+class TestCreateItem:
+    def test_creates_issue_with_ensured_labels(self) -> None:
+        tracker, stub = make_tracker()
+        key = tracker.create_item("Build it", "the body", labels=("tf-plan-abc",))
+        assert key == "#101"
+        assert stub.issues.created_labels == [("tf-plan-abc", "ededed")]
+        create = stub.issues.creates[0]
+        assert create["title"] == "Build it"
+        assert create["body"] == "the body"
+        assert create["labels"] == ["tf-plan-abc"]
+
+    def test_parent_key_attaches_sub_issue(self) -> None:
+        tracker, stub = make_tracker()
+        tracker.create_item("Child", "b", parent_key="#42")
+        method, url, payload = stub.requests[0]
+        assert method == "POST"
+        assert url == "/repos/acme/widgets/issues/42/sub_issues"
+        assert payload == {"sub_issue_id": 101000}  # the created issue's db id
+
+    def test_sub_issue_failure_is_swallowed(self) -> None:
+        # The hierarchy mirror is cosmetic: the created key still returns.
+        tracker, stub = make_tracker()
+        stub.request_error = StubHttpError(404)
+        assert tracker.create_item("Child", "b", parent_key="#42") == "#101"
+
+
+class TestUpdateBody:
+    def test_updates_issue_body(self) -> None:
+        tracker, stub = make_tracker()
+        tracker.update_body("#7", "new body\n\ndepends-on: #5")
+        assert stub.issues.updates == [{"issue_number": 7, "body": "new body\n\ndepends-on: #5"}]
+
+
+class TestMirrorDependencies:
+    def test_native_blocked_by_per_upstream(self) -> None:
+        tracker, stub = make_tracker()
+        stub.issues.issues_by_number = {7: _issue(7), 9: _issue(9)}
+        tracker.mirror_dependencies("#12", ("#7", "#9"))
+        assert stub.requests == [
+            ("POST", "/repos/acme/widgets/issues/12/dependencies/blocked_by", {"issue_id": 7000}),
+            ("POST", "/repos/acme/widgets/issues/12/dependencies/blocked_by", {"issue_id": 9000}),
+        ]
+
+    def test_no_upstreams_is_a_noop(self) -> None:
+        tracker, stub = make_tracker()
+        tracker.mirror_dependencies("#12", ())
+        assert stub.requests == []
+
+    def test_falls_back_to_blocked_by_field_on_board(self) -> None:
+        tracker, stub = make_tracker(project=True)
+        stub.request_error = StubHttpError(404)  # native relationships unavailable
+        stub.graphql.blocked_org_response = blocked_field_payload()
+        stub.graphql.items_response = items_payload([{"id": "I1", "project": {"id": "P1"}}])
+        tracker.mirror_dependencies("#12", ("#7",))
+        assert stub.graphql.mutations == [
+            {"project": "P1", "item": "I1", "field": "FB", "text": "#7"}
+        ]
+
+    def test_raises_when_native_fails_and_no_board(self) -> None:
+        tracker, stub = make_tracker()
+        stub.request_error = StubHttpError(404)
+        with pytest.raises(RuntimeError, match="mirror"):
+            tracker.mirror_dependencies("#12", ("#7",))
+
+    def test_raises_when_fallback_field_missing(self) -> None:
+        tracker, stub = make_tracker(project=True)
+        stub.request_error = StubHttpError(404)
+        stub.graphql.blocked_org_response = StubHttpError(404)
+        stub.graphql.blocked_user_response = StubHttpError(404)
+        with pytest.raises(RuntimeError, match="mirror"):
+            tracker.mirror_dependencies("#12", ("#7",))

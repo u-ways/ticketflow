@@ -5,6 +5,20 @@
 - Revision 2026-08-27: writing native-link mirrors (Jira links, GitHub
   sub-issues) is deferred past M1. The body remains the only read source
   either way; the mirror is cosmetic and can land later without core changes.
+- Revision 2026-08-27 (planner, ADR-0014): the grammar gains a third line,
+  `tf-plan: <plan_id>/<item_index>` — written only by the planner's emit
+  path to tag emitted children, read by sync to hold not-yet-emitted ones.
+  A malformed or conflicting marker is reported as an issue like any other
+  grammar problem. The pure renderer `render_child_body` is the parser's
+  inverse: it raises on anything `parse_body` would report, and emission
+  round-trip-checks every rendered body before pushing it, so a malformed
+  block can never be emitted. Mirror-writing is now implemented for emitted
+  children: Jira `is blocked by` links; GitHub native blocked-by
+  relationships with a Projects v2 "Blocked by" field fallback, plus
+  sub-issue hierarchy under the epic. Mirrors stay write-only, best-effort,
+  and never block emission. `plans.epic_key` stores a tracker key legally:
+  `plans` is a planner table, not an edge, lease or scheduling table, and a
+  plan must be keyable before its epic is ever synced as a node.
 
 ## Context
 

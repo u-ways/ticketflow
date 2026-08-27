@@ -1,10 +1,16 @@
-"""Dependencies and scope hints are parsed from the issue body (ADR-0007).
+"""Dependencies, scope hints and plan markers are parsed from the issue body
+(ADR-0007, ADR-0014).
 
 The parser is a pure function. Malformed blocks are reported as issues, never
-guessed at.
+guessed at. The renderer is its inverse: rendered bodies round-trip and
+anything the parser would flag raises instead of being emitted.
 """
 
-from ticketflow.domain.parser import parse_body
+import pytest
+
+from ticketflow.domain.parser import parse_body, render_child_body
+
+PLAN_ID = "a3f8c2d91b04"
 
 
 class TestDependsOn:
@@ -86,3 +92,84 @@ class TestScopeHints:
         assert parsed.depends_on == ("PROJ-3", "PROJ-4")
         assert parsed.scope == ("src/widget/", "tests/widget/")
         assert parsed.issues == ()
+
+
+class TestPlanMarker:
+    def test_marker_parsed(self) -> None:
+        parsed = parse_body(f"Do the thing.\n\ntf-plan: {PLAN_ID}/3")
+        assert parsed.plan_marker == (PLAN_ID, 3)
+        assert parsed.issues == ()
+
+    def test_absent_marker_is_none(self) -> None:
+        assert parse_body("Just a description.").plan_marker is None
+
+    def test_keyword_case_insensitive(self) -> None:
+        assert parse_body(f"TF-Plan: {PLAN_ID}/0").plan_marker == (PLAN_ID, 0)
+
+    def test_malformed_marker_reported_not_guessed(self) -> None:
+        parsed = parse_body("tf-plan: not-a-marker")
+        assert parsed.plan_marker is None
+        assert len(parsed.issues) == 1
+        assert "tf-plan" in parsed.issues[0]
+
+    def test_conflicting_second_marker_reported_first_wins(self) -> None:
+        parsed = parse_body(f"tf-plan: {PLAN_ID}/1\ntf-plan: {PLAN_ID}/2")
+        assert parsed.plan_marker == (PLAN_ID, 1)
+        assert len(parsed.issues) == 1
+        assert "conflicting" in parsed.issues[0]
+
+    def test_duplicate_identical_marker_is_not_an_issue(self) -> None:
+        parsed = parse_body(f"tf-plan: {PLAN_ID}/1\ntf-plan: {PLAN_ID}/1")
+        assert parsed.plan_marker == (PLAN_ID, 1)
+        assert parsed.issues == ()
+
+    def test_keyword_must_start_the_line(self) -> None:
+        assert parse_body(f"see tf-plan: {PLAN_ID}/1 above").plan_marker is None
+
+
+class TestRenderChildBody:
+    def test_round_trips_through_parse_body(self) -> None:
+        rendered = render_child_body(
+            "Build the widget.\n",
+            plan_id=PLAN_ID,
+            item_index=2,
+            depends_on=("#12", "PROJ-7"),
+            scope=("src/widget/", "tests/"),
+        )
+        parsed = parse_body(rendered)
+        assert parsed.depends_on == ("#12", "PROJ-7")
+        assert parsed.plan_marker == (PLAN_ID, 2)
+        assert parsed.scope == ("src/widget/", "tests/")
+        assert parsed.issues == ()
+
+    def test_re_render_is_byte_identical(self) -> None:
+        first = render_child_body("Body.", plan_id=PLAN_ID, item_index=1, depends_on=("#1",))
+        second = render_child_body("Body.", plan_id=PLAN_ID, item_index=1, depends_on=("#1",))
+        assert first == second
+
+    def test_marker_only_when_no_dependencies(self) -> None:
+        rendered = render_child_body("Root item.", plan_id=PLAN_ID, item_index=0)
+        parsed = parse_body(rendered)
+        assert parsed.depends_on == ()
+        assert parsed.plan_marker == (PLAN_ID, 0)
+        assert parsed.issues == ()
+
+    def test_malformed_key_raises_instead_of_emitting(self) -> None:
+        with pytest.raises(ValueError, match="depends-on key"):
+            render_child_body("B", plan_id=PLAN_ID, item_index=0, depends_on=("not a key!",))
+
+    def test_duplicate_keys_raise(self) -> None:
+        with pytest.raises(ValueError, match="duplicate"):
+            render_child_body("B", plan_id=PLAN_ID, item_index=0, depends_on=("#1", "#1"))
+
+    def test_malformed_plan_id_raises(self) -> None:
+        with pytest.raises(ValueError, match="plan id"):
+            render_child_body("B", plan_id="XYZ", item_index=0)
+
+    def test_negative_index_raises(self) -> None:
+        with pytest.raises(ValueError, match="index"):
+            render_child_body("B", plan_id=PLAN_ID, item_index=-1)
+
+    def test_scope_path_with_comma_raises(self) -> None:
+        with pytest.raises(ValueError, match="scope"):
+            render_child_body("B", plan_id=PLAN_ID, item_index=0, scope=("a,b",))

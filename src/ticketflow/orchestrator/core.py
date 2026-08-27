@@ -21,6 +21,7 @@ from ticketflow.config import Config
 from ticketflow.domain.errors import DependencyCycle
 from ticketflow.domain.model import Attempt, Intent, Node, NodeState
 from ticketflow.domain.parser import parse_body
+from ticketflow.domain.plan import PlanStatus
 from ticketflow.graph.ready import (
     blocked_on_escalated,
     detect_cycles,
@@ -45,6 +46,13 @@ _K_INTENT_CURSOR = "cursor:tracker_intents"
 _K_BOARD_CURSOR = "cursor:board_projection"
 _K_PAUSED = "dispatch_paused"
 _K_IDLE_TICKS = "idle_ticks"
+
+_PLAN_INTENT_PREFIX = "plan_"
+"""Planner-owned intent namespace (ADR-0004 revision, ADR-0014): the tick
+leaves these pending for the planner CLI turn — consuming a plan_approve
+here would silently swallow an approval. Mirrors
+``planner.approval.PLAN_INTENT_PREFIX`` (kept as a literal so the
+scheduling loop never imports planner code)."""
 
 
 def _k_feedback(node_id: str) -> str:
@@ -73,6 +81,10 @@ def _k_lease_expiries(node_id: str) -> str:
 
 def _k_conflict(node_id: str) -> str:
     return f"conflict_attempted:{node_id}"
+
+
+def _k_plan_hold(node_id: str) -> str:
+    return f"plan_hold:{node_id}"
 
 
 def _paths_from_diff_stat(stat: str) -> list[str]:
@@ -121,7 +133,12 @@ class TickReport:
 
 
 class Orchestrator:
-    """Deterministic scheduler + reconciler. The only writer of the store."""
+    """Deterministic scheduler + reconciler.
+
+    The writer of the store, up to ADR-0003's two scoped exceptions: intent
+    ingress from any surface, and planner CLI turns writing plan* tables,
+    ``plan_*`` intent ``processed_at``, and events (ADR-0014).
+    """
 
     def __init__(
         self,
@@ -203,6 +220,12 @@ class Orchestrator:
 
     def _consume_intents(self, report: TickReport) -> None:
         for intent in self._store.unprocessed_intents():
+            if intent.intent_type.startswith(_PLAN_INTENT_PREFIX):
+                # Left pending, no event: the planner turn consumes its own
+                # namespace (ADR-0004 revision). NOTE the unknown-intent
+                # canary tests use the hyphenated "approve-plan", which this
+                # prefix deliberately does not match.
+                continue
             now = self._clock()
             if intent.node_id is None and "external_key" in intent.payload:
                 # The tracker signal arrived before its item was synced (sync
@@ -237,6 +260,21 @@ class Orchestrator:
 
         if kind in ("retry", "resume", "unblock") and node is not None:
             if node.state is NodeState.ESCALATED:
+                if self._plan_hold_active(node.node_id):
+                    # An escalated-then-retried child of a partially emitted
+                    # plan must still not run (ADR-0014): its depends-on
+                    # lines may not exist yet. The hold survives escalation.
+                    self._store.append_event(
+                        "intent_unhandled",
+                        now=now,
+                        node_id=node.node_id,
+                        payload={
+                            "type": kind,
+                            "source": intent.source,
+                            "reason": "plan not fully emitted",
+                        },
+                    )
+                    return
                 feedback = intent.payload.get("feedback")
                 if isinstance(feedback, str) and feedback:
                     self._store.kv_set(_k_feedback(node.node_id), feedback)
@@ -259,6 +297,10 @@ class Orchestrator:
                     blocked_by = "upstream edges unresolved"
                 elif self._has_escalated_ancestor(node.node_id):
                     blocked_by = "escalated ancestor"
+                elif self._plan_hold_active(node.node_id):
+                    # Partially emitted children must never run; unblock
+                    # overrides only the unresolved-key hold (ADR-0014).
+                    blocked_by = "plan not fully emitted"
                 if blocked_by:
                     self._store.append_event(
                         "intent_unhandled",
@@ -397,6 +439,8 @@ class Orchestrator:
                 node_id=node_id,
                 payload={"external_key": item.external_key, "state": state.value},
             )
+            if state is NodeState.BLOCKED:
+                self._apply_plan_hold(node_id, parsed.plan_marker, now)
             return node_id, True
         existing = self._store.get_node(node_id)
         changed = bool(existing and (existing.title != item.title or existing.body != item.body))
@@ -408,10 +452,41 @@ class Orchestrator:
                 scope_hints=parsed.scope,
                 now=now,
             )
+            if existing and existing.state is NodeState.BLOCKED:
+                self._apply_plan_hold(node_id, parsed.plan_marker, now)
         self._store.link_external(
             node_id, provider=item.provider, external_key=item.external_key, etag=item.etag
         )
         return node_id, changed
+
+    def _apply_plan_hold(self, node_id: str, marker: tuple[str, int] | None, now: datetime) -> None:
+        """Hold a planner-emitted child until its whole plan exists.
+
+        The plan is not marked emitted until every item and edge exists;
+        until then its children are invisible to the scheduler (ADR-0014).
+        An unknown plan id (a foreign or rebuilt database) stays held — the
+        safe default. Node creation itself still happens from adapter sync
+        alone; the orchestrator reads the plans table, it never writes it.
+        """
+        if marker is None:
+            return
+        plan_id = marker[0]
+        if self._store.plan_status(plan_id) is PlanStatus.EMITTED:
+            return
+        if self._store.kv_get(_k_plan_hold(node_id)) is None:
+            self._store.kv_set(_k_plan_hold(node_id), plan_id)
+            self._store.set_blocked_reason(node_id, f"awaiting plan emission ({plan_id})", now=now)
+
+    def _plan_hold_active(self, node_id: str) -> bool:
+        """True while the node's emitting plan is not yet complete; clears
+        the hold the first time the plan reads emitted."""
+        plan_id = self._store.kv_get(_k_plan_hold(node_id))
+        if plan_id is None:
+            return False
+        if self._store.plan_status(plan_id) is PlanStatus.EMITTED:
+            self._store.kv_delete(_k_plan_hold(node_id))
+            return False
+        return True
 
     # -- step 3: reconcile running attempts --------------------------------
 
@@ -804,6 +879,8 @@ class Orchestrator:
         for node_id in newly_ready(states, edges):
             if self._store.kv_get(_k_unresolved(node_id)) is not None:
                 continue
+            if self._plan_hold_active(node_id):
+                continue
             self._store.set_state(node_id, NodeState.READY, now=now)
             states[node_id] = NodeState.READY
         for node_id, ancestor in blocked_on_escalated(states, edges).items():
@@ -846,6 +923,11 @@ class Orchestrator:
         now = self._clock()
         node = self._store.get_node(node_id)
         if node is None:
+            return
+        if self._plan_hold_active(node_id):
+            # Backstop for any path to READY the guards did not foresee: a
+            # marker-held child never dispatches while its plan is not
+            # emitted (ADR-0014).
             return
         next_attempt = self._store.bump_attempt_count(node_id, now=now)
         if not self._store.claim_lease(

@@ -1,6 +1,7 @@
 """Lifecycle tests for the reconcile tick (ADR-0008), through fakes only."""
 
 from ticketflow.domain.model import NodeState
+from ticketflow.domain.plan import PlanStatus
 from ticketflow.orchestrator.core import branch_for, derive_node_id
 from ticketflow.ports.codehost import CheckState, ReviewDecision
 from ticketflow.ports.runner import AttemptStatus, FailureClass, PollResult
@@ -478,6 +479,10 @@ class TestIntents:
         assert h.state_of("#1") is NodeState.IN_PROGRESS
 
     def test_unknown_intent_recorded_not_crashing(self, h: Harness) -> None:
+        # Canary: the hyphenated "approve-plan" is deliberately NOT in the
+        # planner's underscore namespace, so it stays a genuine unknown type.
+        # The tick's plan_ prefix skip (core._PLAN_INTENT_PREFIX) must never
+        # match it — see TestPlannerInterlocks for the namespace it does skip.
         h.store.add_intent(intent_type="approve-plan", source="cli", now=h.clock())
         h.orchestrator.tick()
         kinds = [e.kind for e in h.store.events_after(0)]
@@ -569,3 +574,130 @@ class TestScopeRecord:
         assert observed[0].attempt == 1
         assert observed[0].payload["declared"] == ["src/widget.py", "docs/"]
         assert observed[0].payload["actual"] == ["src/widget.py"]
+
+
+class TestPlannerInterlocks:
+    """The tick's two planner obligations (ADR-0014): leave the plan_ intent
+    namespace pending, and hold planner-emitted children until their whole
+    plan exists on the tracker."""
+
+    PLAN_ID = "abc123abc123"
+
+    def make_emitting_plan(self, h: Harness, epic_key: str = "#100") -> str:
+        h.store.create_plan(
+            plan_id=self.PLAN_ID, provider="github", epic_key=epic_key, now=h.clock()
+        )
+        for status in (PlanStatus.GROUNDING, PlanStatus.SYNTHESIS, PlanStatus.IN_REVIEW):
+            h.store.set_plan_status(self.PLAN_ID, status, now=h.clock())
+        h.store.approve_plan(self.PLAN_ID, 1, now=h.clock(), diff={})
+        return self.PLAN_ID
+
+    def test_plan_intents_survive_ticks_unprocessed(self, h: Harness) -> None:
+        # A running orchestrator must never swallow an approval the planner
+        # turn is going to consume (ADR-0004 revision).
+        h.store.add_intent(
+            intent_type="plan_approve",
+            source="cli",
+            payload={"plan_id": self.PLAN_ID, "revision": 1},
+            now=h.clock(),
+        )
+        h.orchestrator.tick()
+        h.orchestrator.tick()
+        [pending] = h.store.unprocessed_intents()
+        assert pending.intent_type == "plan_approve"
+        kinds = [e.kind for e in h.store.events_after(0)]
+        assert "intent_unhandled" not in kinds
+
+    def test_children_held_blocked_until_plan_emitted(self, h: Harness) -> None:
+        plan_id = self.make_emitting_plan(h)
+        h.add_item("#101", "Child", body=f"Do it.\n\ntf-plan: {plan_id}/0")
+        h.orchestrator.tick()
+        h.orchestrator.tick()
+        assert h.state_of("#101") is NodeState.BLOCKED
+        node = h.store.get_node(h.node_id_for("#101"))
+        assert node is not None
+        assert node.blocked_reason is not None
+        assert "awaiting plan emission" in node.blocked_reason
+
+        h.store.set_plan_status(plan_id, PlanStatus.EMITTED, now=h.clock())
+        h.orchestrator.tick()
+        # Released and immediately dispatched in the same tick.
+        assert h.state_of("#101") is NodeState.IN_PROGRESS
+
+    def test_unknown_plan_id_stays_held(self, h: Harness) -> None:
+        # A foreign or rebuilt database: holding is the safe default.
+        h.add_item("#102", "Orphan", body="x\n\ntf-plan: ffffffffffff/0")
+        h.orchestrator.tick()
+        h.orchestrator.tick()
+        assert h.state_of("#102") is NodeState.BLOCKED
+
+    def test_unblock_cannot_release_a_plan_hold(self, h: Harness) -> None:
+        # Partially emitted children must never run; unblock overrides only
+        # the unresolved-key hold (ADR-0014).
+        plan_id = self.make_emitting_plan(h)
+        h.add_item("#103", "Child", body=f"Do it.\n\ntf-plan: {plan_id}/0")
+        h.orchestrator.tick()
+        h.store.add_intent(
+            intent_type="unblock", source="cli", node_id=h.node_id_for("#103"), now=h.clock()
+        )
+        h.orchestrator.tick()
+        assert h.state_of("#103") is NodeState.BLOCKED
+        unhandled = [e for e in h.store.events_after(0) if e.kind == "intent_unhandled"]
+        assert any(e.payload.get("reason") == "plan not fully emitted" for e in unhandled)
+
+    def test_ordinary_items_are_unaffected(self, h: Harness) -> None:
+        self.make_emitting_plan(h)
+        h.add_item("#104", "Plain work")
+        h.orchestrator.tick()
+        assert h.state_of("#104") is NodeState.IN_PROGRESS
+
+    def test_cancel_then_retry_cannot_release_a_plan_hold(self, h: Harness) -> None:
+        # The escalation re-entry path must respect the hold too: cancel on
+        # a held child escalates it, but retry may not run it while its
+        # plan is unfinished (ADR-0014) — its depends-on lines may not
+        # exist yet.
+        plan_id = self.make_emitting_plan(h)
+        h.add_item("#105", "Child", body=f"Do it.\n\ntf-plan: {plan_id}/0")
+        h.orchestrator.tick()
+        h.store.add_intent(
+            intent_type="cancel", source="cli", node_id=h.node_id_for("#105"), now=h.clock()
+        )
+        h.orchestrator.tick()
+        assert h.state_of("#105") is NodeState.ESCALATED
+
+        h.store.add_intent(
+            intent_type="retry", source="cli", node_id=h.node_id_for("#105"), now=h.clock()
+        )
+        h.orchestrator.tick()
+        assert h.state_of("#105") is NodeState.ESCALATED  # refused, not dispatched
+        assert len(h.runner.started) == 0
+        unhandled = [e for e in h.store.events_after(0) if e.kind == "intent_unhandled"]
+        assert any(e.payload.get("reason") == "plan not fully emitted" for e in unhandled)
+
+        # Once the plan completes, the same retry works.
+        h.store.set_plan_status(plan_id, PlanStatus.EMITTED, now=h.clock())
+        h.store.add_intent(
+            intent_type="retry", source="cli", node_id=h.node_id_for("#105"), now=h.clock()
+        )
+        h.orchestrator.tick()
+        assert h.state_of("#105") is NodeState.IN_PROGRESS
+
+    def test_marker_added_by_a_body_update_applies_the_hold(self, h: Harness) -> None:
+        # The update path matters: a node synced before it carried a marker
+        # (or before its plan existed) must gain the hold when a body
+        # update brings the marker in.
+        plan_id = self.make_emitting_plan(h)
+        h.add_item("#106", "Child", body="depends-on: #999")  # held by unresolved key
+        h.orchestrator.tick()
+        assert h.state_of("#106") is NodeState.BLOCKED
+
+        h.tracker.items.clear()
+        h.add_item("#106", "Child", body=f"Do it.\n\ntf-plan: {plan_id}/0")
+        h.orchestrator.tick()
+        h.orchestrator.tick()
+        # The unresolved-key hold is gone; only the plan hold keeps it back.
+        assert h.state_of("#106") is NodeState.BLOCKED
+        node = h.store.get_node(h.node_id_for("#106"))
+        assert node is not None
+        assert node.blocked_reason is not None
+        assert "awaiting plan emission" in node.blocked_reason

@@ -8,12 +8,17 @@ and ``ATLASSIAN_API_TOKEN``/``JIRA_API_TOKEN`` for Jira.
 import os
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from ticketflow.config import Config
 from ticketflow.orchestrator.core import Orchestrator
+from ticketflow.ports.runner import RunnerPort
 from ticketflow.ports.tracker import TrackerPort
 from ticketflow.store.store import Store
 from ticketflow.supervision.workspace import GitWorkspaces
+
+if TYPE_CHECKING:
+    from ticketflow.planner.service import Planner
 
 
 def utc_now() -> datetime:
@@ -50,6 +55,21 @@ def build_tracker(config: Config) -> TrackerPort:
     return GitHubTracker(config.tracker, token=github_token())
 
 
+def build_runner(
+    config: Config, *, yolo: bool = False, clock: Callable[[], datetime] = utc_now
+) -> RunnerPort:
+    from ticketflow.adapters.claude_runner import ClaudeRunner
+
+    return ClaudeRunner(config.runner, config.limits, clock, yolo=yolo)
+
+
+def _build_workspaces(config: Config) -> GitWorkspaces:
+    return GitWorkspaces(
+        config.workspaces_dir,
+        remote_url=f"https://github.com/{config.codehost.repo}.git",
+    )
+
+
 def build_orchestrator(
     config: Config,
     store: Store,
@@ -57,20 +77,53 @@ def build_orchestrator(
     yolo: bool = False,
     clock: Callable[[], datetime] = utc_now,
 ) -> Orchestrator:
-    from ticketflow.adapters.claude_runner import ClaudeRunner
     from ticketflow.adapters.github_codehost import GitHubCodeHost
 
-    workspaces = GitWorkspaces(
-        config.workspaces_dir,
-        remote_url=f"https://github.com/{config.codehost.repo}.git",
-    )
     return Orchestrator(
         store=store,
         tracker=build_tracker(config),
-        runner=ClaudeRunner(config.runner, config.limits, clock, yolo=yolo),
+        runner=build_runner(config, yolo=yolo, clock=clock),
         codehost=GitHubCodeHost(config.codehost.repo, token=github_token()),
-        workspaces=workspaces,
+        workspaces=_build_workspaces(config),
         config=config,
+        clock=clock,
+        yolo=yolo,
+    )
+
+
+def build_planner(
+    config: Config,
+    store: Store,
+    *,
+    yolo: bool = False,
+    clock: Callable[[], datetime] = utc_now,
+) -> Planner:
+    """Compose the offline planner (ADR-0014).
+
+    The synthesis model must be configured — it is never defaulted
+    (ADR-0011); the CLI checks first for a friendlier message.
+    """
+    from ticketflow.adapters.github_codehost import GitHubCodeHost
+    from ticketflow.adapters.pydanticai_synthesis import PydanticAISynthesizer
+    from ticketflow.planner.service import Planner
+    from ticketflow.planner.validate import semantic_errors
+
+    if config.planner.synthesis_model is None:
+        raise ValueError("planner.synthesis_model must be set to run the planner")
+    codehost = GitHubCodeHost(config.codehost.repo, token=github_token())
+    synthesizer = PydanticAISynthesizer(
+        model=config.planner.synthesis_model,
+        validate=semantic_errors,
+        max_retries=config.planner.synthesis_max_retries,
+    )
+    return Planner(
+        store=store,
+        tracker=build_tracker(config),
+        runner=build_runner(config, yolo=yolo, clock=clock),
+        synthesizer=synthesizer,
+        workspaces=_build_workspaces(config),
+        config=config,
+        repo_exists=codehost.repo_exists,
         clock=clock,
         yolo=yolo,
     )

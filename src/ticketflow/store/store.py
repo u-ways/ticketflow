@@ -1,9 +1,12 @@
 """The canonical SQLite state store (ADR-0003).
 
-The orchestrator process is the only writer. WAL mode, busy_timeout set.
-State changes go through the transition table (ADR-0006) and are evented
-atomically in the same transaction (ADR-0005). Events are append-only: this
-class deliberately exposes no way to mutate or delete them.
+The orchestrator process is the writer, with ADR-0003's two scoped
+exceptions: intent ingress from CLI/TUI surfaces, and planner CLI turns
+writing plan* tables, ``plan_*`` intent ``processed_at``, and events
+(ADR-0014). WAL mode, busy_timeout set. State changes go through the
+transition tables (ADR-0006, ADR-0014) and are evented atomically in the
+same transaction (ADR-0005). Events are append-only: this class
+deliberately exposes no way to mutate or delete them.
 
 All timestamps are injected by the caller (the orchestrator owns the clock),
 which keeps every method deterministic and unit-testable.
@@ -26,6 +29,13 @@ from ticketflow.domain.model import (
     Lease,
     Node,
     NodeState,
+)
+from ticketflow.domain.plan import (
+    EmittedPlanItem,
+    PlanRecord,
+    PlanRevision,
+    PlanStatus,
+    assert_legal_plan,
 )
 from ticketflow.domain.transitions import assert_legal
 from ticketflow.store.migrations import apply_migrations
@@ -621,6 +631,290 @@ class Store:
         if row is None or row["runs"] == 0:
             return 0.0
         return float(row["flakes"]) / float(row["runs"])
+
+    # -- plans (migration 4, ADR-0014) -------------------------------------
+    #
+    # Written by planner CLI turns — the second scoped writer of ADR-0003's
+    # revision: plan* tables, processed_at on plan_* intents, and events;
+    # never nodes, edges, leases, attempts or kv.
+
+    def create_plan(self, *, plan_id: str, provider: str, epic_key: str, now: datetime) -> None:
+        """Insert a new plan, atomically with its event (ADR-0005).
+
+        The ``idx_plans_active`` partial unique index raises IntegrityError
+        when the epic already has a live plan; callers check
+        :meth:`plan_for_epic` first and treat the race as an error.
+        """
+        with self._txn():
+            self._conn.execute(
+                """
+                INSERT INTO plans (plan_id, provider, epic_key, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (plan_id, provider, epic_key, _iso(now), _iso(now)),
+            )
+            self._append_event_row(
+                kind="plan_created",
+                now=now,
+                node_id=None,
+                attempt=None,
+                payload={"plan_id": plan_id, "epic_key": epic_key},
+            )
+
+    def get_plan(self, plan_id: str) -> PlanRecord | None:
+        row = self._conn.execute("SELECT * FROM plans WHERE plan_id = ?", (plan_id,)).fetchone()
+        return self._plan_from_row(row) if row else None
+
+    def plan_status(self, plan_id: str) -> PlanStatus | None:
+        row = self._conn.execute(
+            "SELECT status FROM plans WHERE plan_id = ?", (plan_id,)
+        ).fetchone()
+        return PlanStatus(row["status"]) if row else None
+
+    def plan_for_epic(self, provider: str, epic_key: str) -> PlanRecord | None:
+        """The epic's live plan (not emitted, not discarded), if any."""
+        row = self._conn.execute(
+            """
+            SELECT * FROM plans
+            WHERE provider = ? AND epic_key = ? AND status NOT IN ('emitted', 'discarded')
+            """,
+            (provider, epic_key),
+        ).fetchone()
+        return self._plan_from_row(row) if row else None
+
+    def list_plans(self, status: PlanStatus | None = None) -> list[PlanRecord]:
+        if status is None:
+            rows = self._conn.execute("SELECT * FROM plans ORDER BY created_at").fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM plans WHERE status = ? ORDER BY created_at", (status.value,)
+            ).fetchall()
+        return [self._plan_from_row(row) for row in rows]
+
+    def set_plan_status(
+        self,
+        plan_id: str,
+        to_status: PlanStatus,
+        *,
+        now: datetime,
+        reason: str | None = None,
+    ) -> PlanRecord:
+        """Apply a plan transition, atomically with its event (ADR-0005)."""
+        plan = self._require_plan(plan_id)
+        assert_legal_plan(plan.status, to_status)
+        with self._txn():
+            self._conn.execute(
+                """
+                UPDATE plans
+                SET status = ?, discard_reason = ?, updated_at = ?
+                WHERE plan_id = ?
+                """,
+                (
+                    to_status.value,
+                    reason if to_status is PlanStatus.DISCARDED else plan.discard_reason,
+                    _iso(now),
+                    plan_id,
+                ),
+            )
+            self._append_event_row(
+                kind="plan_status_changed",
+                now=now,
+                node_id=None,
+                attempt=None,
+                payload={
+                    "plan_id": plan_id,
+                    "from": plan.status.value,
+                    "to": to_status.value,
+                    "reason": reason,
+                },
+            )
+        return self._require_plan(plan_id)
+
+    def bump_grounding_attempt(self, plan_id: str, *, now: datetime) -> int:
+        """Claim the next grounding attempt number BEFORE dispatch.
+
+        Monotonic like node attempts (ADR-0008): a crash between dispatch
+        and bookkeeping must never let a re-run reuse a live orphan's
+        attempt number, run dir, or workspace."""
+        self._require_plan(plan_id)
+        row = self._conn.execute(
+            """
+            UPDATE plans
+            SET grounding_attempts = grounding_attempts + 1, updated_at = ?
+            WHERE plan_id = ? RETURNING grounding_attempts
+            """,
+            (_iso(now), plan_id),
+        ).fetchone()
+        return int(row[0])
+
+    def set_grounding_process(
+        self, plan_id: str, *, pid: int, create_time: float, now: datetime
+    ) -> None:
+        """Record the dispatched grounding process's identity."""
+        self._require_plan(plan_id)
+        self._conn.execute(
+            """
+            UPDATE plans
+            SET grounding_pid = ?, grounding_create_time = ?, updated_at = ?
+            WHERE plan_id = ?
+            """,
+            (pid, create_time, _iso(now), plan_id),
+        )
+
+    def set_plan_session(self, plan_id: str, session_id: str, *, now: datetime) -> None:
+        self._require_plan(plan_id)
+        self._conn.execute(
+            "UPDATE plans SET session_id = ?, updated_at = ? WHERE plan_id = ?",
+            (session_id, _iso(now), plan_id),
+        )
+
+    def set_plan_brief(self, plan_id: str, brief: str, *, now: datetime) -> None:
+        self._require_plan(plan_id)
+        self._conn.execute(
+            "UPDATE plans SET brief = ?, updated_at = ? WHERE plan_id = ?",
+            (brief, _iso(now), plan_id),
+        )
+
+    def add_plan_revision(self, plan_id: str, *, yaml_text: str, source: str, now: datetime) -> int:
+        """Append the next revision; bumps ``current_revision`` atomically."""
+        plan = self._require_plan(plan_id)
+        revision = plan.current_revision + 1
+        with self._txn():
+            self._conn.execute(
+                """
+                INSERT INTO plan_revisions (plan_id, revision, source, yaml, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (plan_id, revision, source, yaml_text, _iso(now)),
+            )
+            self._conn.execute(
+                "UPDATE plans SET current_revision = ?, updated_at = ? WHERE plan_id = ?",
+                (revision, _iso(now), plan_id),
+            )
+        return revision
+
+    def get_plan_revision(self, plan_id: str, revision: int) -> PlanRevision | None:
+        row = self._conn.execute(
+            "SELECT * FROM plan_revisions WHERE plan_id = ? AND revision = ?",
+            (plan_id, revision),
+        ).fetchone()
+        return self._revision_from_row(row) if row else None
+
+    def approve_plan(
+        self, plan_id: str, revision: int, *, now: datetime, diff: dict[str, Any]
+    ) -> PlanRecord:
+        """Pin the approved revision and enter ``emitting``, atomically with
+        the ``plan_approved`` event whose payload is the
+        first-proposal-versus-approved diff (spec §13.5 rule 3)."""
+        plan = self._require_plan(plan_id)
+        assert_legal_plan(plan.status, PlanStatus.EMITTING)
+        with self._txn():
+            self._conn.execute(
+                """
+                UPDATE plans
+                SET status = ?, approved_revision = ?, updated_at = ?
+                WHERE plan_id = ?
+                """,
+                (PlanStatus.EMITTING.value, revision, _iso(now), plan_id),
+            )
+            self._append_event_row(
+                kind="plan_approved",
+                now=now,
+                node_id=None,
+                attempt=None,
+                payload={"plan_id": plan_id, "revision": revision, **diff},
+            )
+        return self._require_plan(plan_id)
+
+    def record_emitted_item(
+        self, plan_id: str, item_index: int, *, external_key: str, now: datetime
+    ) -> bool:
+        """Idempotent ledger insert: the PK is the (plan id, item index)
+        idempotency key (ADR-0014); re-recording is a no-op returning False."""
+        cursor = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO plan_emitted_items
+                (plan_id, item_index, external_key, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (plan_id, item_index, external_key, _iso(now)),
+        )
+        return cursor.rowcount == 1
+
+    def emitted_items(self, plan_id: str) -> list[EmittedPlanItem]:
+        rows = self._conn.execute(
+            "SELECT * FROM plan_emitted_items WHERE plan_id = ? ORDER BY item_index",
+            (plan_id,),
+        ).fetchall()
+        return [self._emitted_from_row(row) for row in rows]
+
+    def mark_item_edges_written(self, plan_id: str, item_index: int, *, now: datetime) -> bool:
+        """Guarded memo: only the first call writes; re-runs are no-ops."""
+        cursor = self._conn.execute(
+            """
+            UPDATE plan_emitted_items SET edges_written_at = ?
+            WHERE plan_id = ? AND item_index = ? AND edges_written_at IS NULL
+            """,
+            (_iso(now), plan_id, item_index),
+        )
+        return cursor.rowcount == 1
+
+    def mark_item_mirrored(self, plan_id: str, item_index: int, *, now: datetime) -> bool:
+        """Guarded memo for the best-effort dependency mirror (ADR-0007)."""
+        cursor = self._conn.execute(
+            """
+            UPDATE plan_emitted_items SET mirrored_at = ?
+            WHERE plan_id = ? AND item_index = ? AND mirrored_at IS NULL
+            """,
+            (_iso(now), plan_id, item_index),
+        )
+        return cursor.rowcount == 1
+
+    def _require_plan(self, plan_id: str) -> PlanRecord:
+        plan = self.get_plan(plan_id)
+        if plan is None:
+            raise UnknownNode(f"no such plan: {plan_id}")
+        return plan
+
+    @staticmethod
+    def _plan_from_row(row: sqlite3.Row) -> PlanRecord:
+        return PlanRecord(
+            plan_id=row["plan_id"],
+            provider=row["provider"],
+            epic_key=row["epic_key"],
+            status=PlanStatus(row["status"]),
+            current_revision=row["current_revision"],
+            approved_revision=row["approved_revision"],
+            grounding_attempts=row["grounding_attempts"],
+            grounding_pid=row["grounding_pid"],
+            grounding_create_time=row["grounding_create_time"],
+            session_id=row["session_id"],
+            brief=row["brief"],
+            discard_reason=row["discard_reason"],
+            created_at=_from_iso(row["created_at"]),
+            updated_at=_from_iso(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _revision_from_row(row: sqlite3.Row) -> PlanRevision:
+        return PlanRevision(
+            plan_id=row["plan_id"],
+            revision=row["revision"],
+            source=row["source"],
+            yaml=row["yaml"],
+            created_at=_from_iso(row["created_at"]),
+        )
+
+    @staticmethod
+    def _emitted_from_row(row: sqlite3.Row) -> EmittedPlanItem:
+        return EmittedPlanItem(
+            plan_id=row["plan_id"],
+            item_index=row["item_index"],
+            external_key=row["external_key"],
+            created_at=_from_iso(row["created_at"]),
+            edges_written_at=_from_iso(row["edges_written_at"]),
+            mirrored_at=_from_iso(row["mirrored_at"]),
+        )
 
     # -- kv bookkeeping (migration 2) --------------------------------------
 

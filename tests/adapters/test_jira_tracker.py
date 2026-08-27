@@ -31,6 +31,8 @@ class StubJiraClient:
         self.issues: dict[str, dict[str, Any]] = {}
         self.field_updates: list[tuple[str, dict[str, Any]]] = []
         self.comments: list[tuple[str, str]] = []
+        self.created_issues: list[dict[str, Any]] = []
+        self.issue_links: list[dict[str, Any]] = []
 
     def jql(
         self, jql: str, fields: str = "*all", start: int = 0, limit: int | None = None
@@ -56,6 +58,13 @@ class StubJiraClient:
 
     def issue_add_comment(self, issue_key: str, comment: str) -> None:
         self.comments.append((issue_key, comment))
+
+    def issue_create(self, fields: dict[str, Any]) -> dict[str, Any]:
+        self.created_issues.append(fields)
+        return {"id": "10001", "key": f"PROJ-{100 + len(self.created_issues)}"}
+
+    def create_issue_link(self, data: dict[str, Any]) -> None:
+        self.issue_links.append(data)
 
 
 def make_config(**overrides: Any) -> TrackerConfig:
@@ -353,3 +362,59 @@ class TestAdfDescription:
         parsed = parse_body(_description_text(adf))
         assert parsed.depends_on == ("KAN-9",)
         assert parsed.scope == ("src/",)
+
+
+class TestCreateItem:
+    def test_creates_issue_with_configured_type_and_labels(self) -> None:
+        client = StubJiraClient()
+        tracker = JiraTracker(make_config(issue_type="Story"), client=client)
+        key = tracker.create_item("Build it", "the body", labels=("tf-plan-abc",))
+        assert key == "PROJ-101"
+        fields = client.created_issues[0]
+        assert fields["project"] == {"key": "PROJ"}
+        assert fields["summary"] == "Build it"
+        assert fields["description"] == "the body"
+        assert fields["issuetype"] == {"name": "Story"}
+        assert fields["labels"] == ["tf-plan-abc"]
+
+    def test_parent_key_is_ignored(self) -> None:
+        client = StubJiraClient()
+        tracker = make_tracker(client)
+        tracker.create_item("Child", "b", parent_key="PROJ-1")
+        assert "parent" not in client.created_issues[0]
+
+    def test_default_issue_type_is_task(self) -> None:
+        client = StubJiraClient()
+        make_tracker(client).create_item("t", "b")
+        assert client.created_issues[0]["issuetype"] == {"name": "Task"}
+
+
+class TestUpdateBody:
+    def test_replaces_description(self) -> None:
+        client = StubJiraClient()
+        make_tracker(client).update_body("PROJ-7", "new\n\ndepends-on: PROJ-5")
+        assert client.field_updates == [("PROJ-7", {"description": "new\n\ndepends-on: PROJ-5"})]
+
+
+class TestMirrorDependencies:
+    def test_creates_is_blocked_by_links(self) -> None:
+        # Blocks link type: the inward issue *is blocked by* the outward one.
+        client = StubJiraClient()
+        make_tracker(client).mirror_dependencies("PROJ-9", ("PROJ-5", "PROJ-6"))
+        assert client.issue_links == [
+            {
+                "type": {"name": "Blocks"},
+                "inwardIssue": {"key": "PROJ-9"},
+                "outwardIssue": {"key": "PROJ-5"},
+            },
+            {
+                "type": {"name": "Blocks"},
+                "inwardIssue": {"key": "PROJ-9"},
+                "outwardIssue": {"key": "PROJ-6"},
+            },
+        ]
+
+    def test_no_upstreams_creates_no_links(self) -> None:
+        client = StubJiraClient()
+        make_tracker(client).mirror_dependencies("PROJ-9", ())
+        assert client.issue_links == []

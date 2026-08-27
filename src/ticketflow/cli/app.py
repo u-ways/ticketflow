@@ -2,10 +2,15 @@
 
 Every human action here writes an intent (ADR-0004) — the CLI is not
 privileged and never mutates node state directly. Status commands are
-read-only projections of the store (ADR-0003).
+read-only projections of the store (ADR-0003). The ``plan`` sub-app is the
+offline planner's surface (ADR-0014): planner turns are the second scoped
+store writer of ADR-0003's revision (plan* tables, ``plan_*`` intent
+``processed_at``, events — nothing else).
 """
 
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -16,6 +21,7 @@ from ticketflow.config import Config, load_config
 from ticketflow.domain.model import NodeState
 
 if TYPE_CHECKING:
+    from ticketflow.planner.service import Planner
     from ticketflow.store.store import Store
 
 app = typer.Typer(
@@ -52,6 +58,12 @@ attempt_timeout_seconds = 3600
 cycle_cap = 100
 max_attempts = 3
 halt_ticks = 10
+
+# [planner]                    # offline planner (ADR-0014): `ticketflow plan`
+# synthesis_model = "claude-sonnet-5"  # required for `plan new`; never defaulted
+# grounding_model = "claude-sonnet-5"  # omit for the runner default
+# grounding_allowed_tools = ["Read", "Grep", "Glob"]
+# grounding_timeout_seconds = 1800     # runaway guard, not a budget
 """
 
 
@@ -115,11 +127,7 @@ def run(
     cfg = _load(config)
     if yolo:
         # One warning at startup, then nothing (ADR-0013).
-        typer.echo(
-            "yolo: plans auto-approve and agents run without permission prompts. "
-            "The repo's own gates are now the only thing checking the work.",
-            err=True,
-        )
+        typer.echo(_YOLO_WARNING, err=True)
     store = open_store(cfg)
     try:
         orchestrator = build_orchestrator(cfg, store, yolo=yolo)
@@ -263,6 +271,317 @@ def unblock(node_id: str, config: ConfigOption = DEFAULT_CONFIG) -> None:
 def resume(config: ConfigOption = DEFAULT_CONFIG) -> None:
     """Resume dispatch after a quota pause (writes a global resume intent)."""
     _write_intent(config, "resume", None, {})
+
+
+# -- the offline planner (ADR-0014) -----------------------------------------
+
+plan_app = typer.Typer(
+    name="plan",
+    help="Offline planner (ADR-0014): propose a decomposition, review it, emit it.",
+    no_args_is_help=True,
+)
+app.add_typer(plan_app)
+
+_YOLO_WARNING = (
+    "yolo: plans auto-approve and agents run without permission prompts. "
+    "The repo's own gates are now the only thing checking the work."
+)
+
+
+def _build_planner_or_exit(
+    config_path: Path, *, yolo: bool = False
+) -> tuple[Config, Store, Planner]:
+    from ticketflow.cli.factory import build_planner, open_store
+
+    cfg = _load(config_path)
+    if cfg.planner.synthesis_model is None:
+        typer.echo(
+            "planner.synthesis_model is not set. Add it under [planner] in "
+            f"{config_path} — the model always comes from config (ADR-0011).",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    store = open_store(cfg)
+    return cfg, store, build_planner(cfg, store, yolo=yolo)
+
+
+@contextmanager
+def _plan_errors() -> Iterator[None]:
+    from ticketflow.domain.errors import (
+        GroundingFailed,
+        PlanTurnRefused,
+        PlanValidationError,
+        UnknownEpic,
+    )
+
+    try:
+        yield
+    except (UnknownEpic, PlanTurnRefused, PlanValidationError, GroundingFailed) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+
+def _plan_file(cfg: Config, epic_key: str) -> Path:
+    from ticketflow.planner.yaml_io import plan_filename
+
+    return cfg.plans_dir / plan_filename(epic_key)
+
+
+@plan_app.command("new")
+def plan_new(
+    epic_key: str,
+    config: ConfigOption = DEFAULT_CONFIG,
+    yolo: Annotated[
+        bool, typer.Option("--yolo", help="Auto-approve the plan and emit it immediately.")
+    ] = False,
+) -> None:
+    """Ground the epic, synthesize a plan, and surface it for review.
+
+    Resumable: re-running continues from wherever a previous run stopped.
+    """
+    from ticketflow.domain.plan import PlanStatus
+
+    if yolo:
+        # One warning at startup, then nothing (ADR-0013).
+        typer.echo(_YOLO_WARNING, err=True)
+    cfg, store, planner = _build_planner_or_exit(config, yolo=yolo)
+    try:
+        with _plan_errors():
+            plan = planner.new(epic_key)
+        typer.echo(
+            f"plan {plan.plan_id} for {epic_key}: {plan.status.value} "
+            f"(revision {plan.current_revision})"
+        )
+        if plan.status is PlanStatus.IN_REVIEW:
+            typer.echo(
+                f"review it: `ticketflow plan show {epic_key}`, hand-edit "
+                f"{_plan_file(cfg, epic_key)} (then `ticketflow plan validate`), or "
+                f"`ticketflow plan revise {epic_key} --feedback '...'`; approve with "
+                f"`ticketflow plan approve {epic_key}` and emit with "
+                f"`ticketflow plan emit {epic_key}`."
+            )
+    finally:
+        store.close()
+
+
+@plan_app.command("show")
+def plan_show(epic_key: str, config: ConfigOption = DEFAULT_CONFIG) -> None:
+    """Show the plan: items, then edges ascending by confidence (read-only).
+
+    Review is mostly pruning (spec §13.2), so the least-evidenced proposals
+    come first and uncited ones are listed apart.
+    """
+    from ticketflow.planner.yaml_io import load_plan
+
+    cfg = _load(config)
+    store = _open_read_only(config)
+    if store is None:
+        return
+    try:
+        plan = store.plan_for_epic(cfg.tracker.provider, epic_key)
+        if plan is None:
+            typer.echo(f"No live plan for {epic_key}.")
+            return
+        typer.echo(
+            f"{plan.plan_id}  {plan.status.value:<12} revision={plan.current_revision}  "
+            f"epic={plan.epic_key}"
+        )
+        blob = store.get_plan_revision(plan.plan_id, plan.current_revision)
+        if blob is not None:
+            parsed = load_plan(blob.yaml)
+            typer.echo("items:")
+            for item in parsed.items:
+                typer.echo(f"  [{item.index}] {item.title}")
+            if parsed.edges:
+                typer.echo("edges, ascending by confidence (prune what you don't believe):")
+                for edge in sorted(parsed.edges, key=lambda e: e.confidence):
+                    typer.echo(
+                        f"  {edge.upstream} -> {edge.downstream}  "
+                        f"{edge.confidence:.2f}  {edge.evidence}"
+                    )
+            if parsed.unevidenced_edges:
+                typer.echo("proposed WITHOUT evidence (promote with evidence, or delete):")
+                for edge in parsed.unevidenced_edges:
+                    typer.echo(f"  {edge.upstream} -> {edge.downstream}  {edge.confidence:.2f}")
+        emitted = store.emitted_items(plan.plan_id)
+        if emitted:
+            typer.echo("emission:")
+            for entry in emitted:
+                edges = "edges written" if entry.edges_written_at else "edges pending"
+                typer.echo(f"  [{entry.item_index}] {entry.external_key}  {edges}")
+    finally:
+        store.close()
+
+
+@plan_app.command("list")
+def plan_list(config: ConfigOption = DEFAULT_CONFIG) -> None:
+    """List every plan and its lifecycle status (read-only)."""
+    store = _open_read_only(config)
+    if store is None:
+        return
+    try:
+        plans = store.list_plans()
+        if not plans:
+            typer.echo("No plans yet. Start one with `ticketflow plan new <epic-key>`.")
+            return
+        for plan in plans:
+            typer.echo(
+                f"{plan.plan_id}  {plan.status.value:<12} revision={plan.current_revision}  "
+                f"{plan.epic_key}"
+            )
+    finally:
+        store.close()
+
+
+@plan_app.command("edit")
+def plan_edit(epic_key: str, config: ConfigOption = DEFAULT_CONFIG) -> None:
+    """Open the plan YAML in $EDITOR, then validate the edit as a revision.
+
+    A failing edit rejects the turn, not the plan: the file stays on disk
+    for fixing and the previous revision stands (spec §13.5).
+    """
+    import os
+    import shlex
+    import subprocess
+
+    cfg, store, planner = _build_planner_or_exit(config)
+    try:
+        with _plan_errors():
+            path = _plan_file(cfg, epic_key)
+            if not path.is_file():
+                from ticketflow.planner.yaml_io import write_plan_file
+
+                plan = planner.ingest(epic_key)
+                blob = store.get_plan_revision(plan.plan_id, plan.current_revision)
+                if blob is None:
+                    typer.echo(f"nothing to edit yet: run `ticketflow plan new {epic_key}`.")
+                    return
+                write_plan_file(cfg.plans_dir, epic_key, blob.yaml)
+            editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
+            subprocess.run([*shlex.split(editor), str(path)], check=True)
+            revision = planner.validate_file(epic_key)
+        if revision is None:
+            typer.echo("no changes.")
+        else:
+            typer.echo(f"revision {revision} recorded from your edit.")
+    finally:
+        store.close()
+
+
+@plan_app.command("validate")
+def plan_validate(epic_key: str, config: ConfigOption = DEFAULT_CONFIG) -> None:
+    """Validate a hand-edited plan file and record it as a revision."""
+    _, store, planner = _build_planner_or_exit(config)
+    try:
+        with _plan_errors():
+            revision = planner.validate_file(epic_key)
+        if revision is None:
+            typer.echo("plan file matches the current revision; nothing recorded.")
+        else:
+            typer.echo(f"revision {revision} recorded from your edit.")
+    finally:
+        store.close()
+
+
+@plan_app.command("revise")
+def plan_revise(
+    epic_key: str,
+    feedback: Annotated[
+        str, typer.Option("--feedback", help="What to change and why, in your words.")
+    ],
+    config: ConfigOption = DEFAULT_CONFIG,
+) -> None:
+    """One conversational revision turn: the planner applies your feedback
+    and re-derives its consequences; the result is validated and versioned."""
+    _, store, planner = _build_planner_or_exit(config)
+    try:
+        with _plan_errors():
+            revision = planner.revise(epic_key, feedback)
+        typer.echo(f"revision {revision} recorded. Review with `ticketflow plan show`.")
+    finally:
+        store.close()
+
+
+@plan_app.command("approve")
+def plan_approve(
+    epic_key: str,
+    config: ConfigOption = DEFAULT_CONFIG,
+    rev: Annotated[
+        int | None,
+        typer.Option(
+            "--rev",
+            help="Revision to approve; must be the latest (approval is digest-pinned).",
+        ),
+    ] = None,
+) -> None:
+    """Approve the plan (writes a plan_approve intent, ADR-0004).
+
+    All-or-nothing: the whole revision is approved, pinned by content
+    digest. Emission happens on `ticketflow plan emit`.
+    """
+    _, store, planner = _build_planner_or_exit(config)
+    try:
+        with _plan_errors():
+            intent_id = planner.request_approval(epic_key, rev)
+        if intent_id is None:
+            typer.echo("that approval is already recorded.")
+        else:
+            typer.echo(
+                f"intent {intent_id} recorded (plan_approve); "
+                f"run `ticketflow plan emit {epic_key}` to create the child tickets."
+            )
+    finally:
+        store.close()
+
+
+@plan_app.command("reject")
+def plan_reject(
+    epic_key: str,
+    reason: Annotated[str, typer.Option("--reason", help="Why the plan is wrong.")],
+    config: ConfigOption = DEFAULT_CONFIG,
+) -> None:
+    """Reject the plan: a plan_reject intent is written and consumed in the
+    same turn, discarding the plan (ADR-0004)."""
+    _, store, planner = _build_planner_or_exit(config)
+    try:
+        with _plan_errors():
+            intent_id = planner.request_rejection(epic_key, reason)
+        if intent_id is None:
+            typer.echo("that rejection is already recorded.")
+        else:
+            typer.echo(
+                f"intent {intent_id} recorded (plan_reject); the plan is discarded. "
+                f"`ticketflow plan new {epic_key}` starts a fresh one."
+            )
+    finally:
+        store.close()
+
+
+@plan_app.command("emit")
+def plan_emit(epic_key: str, config: ConfigOption = DEFAULT_CONFIG) -> None:
+    """Emit the approved plan as tracker tickets. Idempotent and resumable:
+    re-running after a failure adopts what already exists (ADR-0014)."""
+    _, store, planner = _build_planner_or_exit(config)
+    try:
+        with _plan_errors():
+            report = planner.emit(epic_key)
+        if report.complete:
+            listed = ", ".join(report.child_keys)
+            typer.echo(
+                f"emitted {len(report.child_keys)} child items ({listed}); "
+                f"created={report.created} adopted={report.adopted} "
+                f"mirrored={report.mirrored}. The orchestrator picks them up on sync."
+            )
+        else:
+            typer.echo(
+                f"emission incomplete: {report.failure}\n"
+                f"created so far: {', '.join(report.child_keys) or '(none)'}\n"
+                f"re-run `ticketflow plan emit {epic_key}` to resume; nothing is rolled back.",
+                err=True,
+            )
+            raise typer.Exit(code=3)
+    finally:
+        store.close()
 
 
 def main() -> None:

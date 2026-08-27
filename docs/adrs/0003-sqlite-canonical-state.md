@@ -14,6 +14,18 @@
   — that is precisely how a human signal enters — serialized against the
   single orchestrator writer by WAL and busy_timeout. Status views open
   read-only connections and every other table stays orchestrator-only.
+- Revision 2026-08-27 (planner, ADR-0014): migration 4 adds the planner
+  tables — `plans` (lifecycle rows, one live plan per epic via a partial
+  unique index), `plan_revisions` (append-only byte-exact YAML blobs), and
+  `plan_emitted_items` (the emission ledger whose primary key is the
+  idempotency key). A second, narrowly scoped writer joins the intent-ingress
+  exception: a planner CLI turn (`ticketflow plan ...`) may write the
+  `plan*` tables, set `processed_at` on `plan_*` intents it consumes
+  (ADR-0004), and append events. It never writes nodes, edges, leases,
+  attempts or kv; the concurrency with a running orchestrator is brief,
+  touches disjoint tables, and is serialized by WAL and busy_timeout. The
+  orchestrator reads `plans.status` (for the emission hold, ADR-0014) and
+  never writes plan tables.
 - Date: 2026-08-27
 
 ## Context
@@ -95,7 +107,10 @@ Harder or deferred:
   access is stdlib `sqlite3` only.
 - Flag any database write (`INSERT`, `UPDATE`, `DELETE`, DDL) issued outside
   the orchestrator process's code paths — in particular from adapter, TUI, or
-  status-command modules.
+  status-command modules — except the two scoped exceptions of the revisions
+  above: intent ingress, and planner turns writing `plan*` tables, `plan_*`
+  intent `processed_at`, and events. Flag planner code writing nodes, edges,
+  leases, attempts or kv.
 - Require reader code paths (status commands, TUI) to open connections
   read-only (e.g. `mode=ro` URI or equivalent) and flag any reader that begins
   a transaction spanning a render or holds a cursor across UI drawing calls.
@@ -103,7 +118,8 @@ Harder or deferred:
   bumps `user_version`; flag schema statements executed ad hoc from application
   code or scripts that modify an already-merged migration.
 - Flag connection setup that omits WAL mode or `busy_timeout`, and flag any
-  second writer connection opened alongside the orchestrator's.
+  second writer connection opened alongside the orchestrator's other than a
+  planner CLI turn within its scoped table set (revision above).
 - Flag new orchestrator state held only in process memory — long-lived dicts,
   caches or queues tracking node, lease, attempt or intent state that is not
   backed by a table or the `runs/` directory (see ADR-0010).
