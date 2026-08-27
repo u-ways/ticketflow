@@ -2,6 +2,12 @@
 
 - Status: Accepted
 - Date: 2026-08-27
+- Revision 2026-08-27: three edges added to the table beyond the spec's
+  diagram — `InProgress → Merged` (bootstrap: no repo existed, so the initial
+  push completes the node, spec §9.1 step 0), and `Blocked → Escalated` /
+  `Ready → Escalated` (an operator cancel/reject intent pulls a node that has
+  never run out of the graph; escalation already being the single
+  needs-a-human state, it also records deliberate withdrawal).
 
 ## Context
 
@@ -47,6 +53,12 @@ Adopt the spec's node state machine (spec §6) exactly.
   | InProgress | Provider quota exhaustion |
   | AwaitingSignals | Checks stuck red past the cycle cap |
   | AddressingFeedback | Feedback cycle cap exceeded |
+  | Blocked, Ready | Operator cancel/reject intent (revision above) |
+
+- Two further legal edges beyond the trigger table: `InProgress → Merged` for
+  the bootstrap case (the node's work is its initial push, spec §9.1 step 0),
+  and `InProgress → AwaitingSignals`'s counterpart `InProgress → Ready` on
+  lease expiry.
 
 - Escalation is terminal for the orchestrator. A human resolves it by writing an
   intent (ADR-0004), which re-enters the machine at `Ready` with attempt
