@@ -2,6 +2,7 @@
 
 import json
 import stat
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -30,7 +31,7 @@ BAD_DRAFT = {
 }
 
 
-def make_fake_claude(tmp_path: Path, *drafts: dict[str, object]) -> str:
+def make_fake_claude(tmp_path: Path, *drafts: Mapping[str, object]) -> str:
     """A fake ``claude`` that answers with each draft in turn.
 
     Emits the real CLI's ``--output-format json`` envelope; records every
