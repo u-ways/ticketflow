@@ -5,6 +5,12 @@
 - Revision 2026-08-27: dev-group additions that only support the gates
   themselves — typing stubs (`types-*`) and similar zero-runtime tooling —
   are routine and need no ADR amendment; runtime dependencies always do.
+- Revision 2026-08-27 (planner, ADR-0014): two runtime dependencies added —
+  `pydantic-ai-slim[anthropic]` (MIT; planner synthesis, imported only in
+  its adapter per ADR-0002) and `ruamel.yaml` (MIT; plan-file round-trip
+  with comments). Both use compatible ranges: the exact-pin rule below
+  covers only `githubkit` and the agent SDK/CLI packages, and `uv.lock`
+  resolves the exact versions everywhere.
 
 ## Context
 

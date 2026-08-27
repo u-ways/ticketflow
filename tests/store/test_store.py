@@ -265,7 +265,8 @@ class TestIntents:
         assert store.unprocessed_intents() == []
 
     def test_unknown_intent_types_are_stored_not_rejected(self, store: Store) -> None:
-        # ADR-0014: intent handling must not close off new types.
+        # ADR-0014: intent handling must not close off new types (canary:
+        # see test_tick's planner interlocks).
         intent_id = store.add_intent(intent_type="approve-plan", source="cli", now=T0)
         assert intent_id is not None
         assert store.unprocessed_intents()[0].intent_type == "approve-plan"

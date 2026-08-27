@@ -24,7 +24,7 @@ ADR is the reviewer's rubric; its comments block merge until resolved.
 | [0011](0011-runner-adapters-headless-cli.md) | Runner adapters: headless CLI first, SDK client attach later | Accepted |
 | [0012](0012-toolchain-and-delivery.md) | Toolchain and delivery: Python 3.14, uv, just, TDD, CI gates | Accepted |
 | [0013](0013-operational-policies.md) | Operational policies: yolo mode, spend, retention | Accepted |
-| [0014](0014-planner-deferred.md) | The planner is a separate offline phase (deferred) | Accepted (implementation deferred) |
+| [0014](0014-planner.md) | The planner is a separate offline phase | Accepted |
 
 ## Format
 

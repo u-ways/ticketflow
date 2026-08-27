@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 
 from ticketflow.domain.model import NodeState
+from ticketflow.planner.schema import Plan
+from ticketflow.planner.synthesis import RevisionRequest, SynthesisRequest
 from ticketflow.ports.codehost import (
     CheckConclusion,
     CheckState,
@@ -33,13 +35,31 @@ from ticketflow.ports.tracker import (
 
 
 class FakeTracker:
-    """Scriptable tracker: seed items/intents, observe pushes."""
+    """Scriptable tracker: seed items/intents, observe pushes and emission.
+
+    Created items land in ``self.items`` with sequential keys, so a
+    subsequent ``fetch_nodes`` returns them — emitted children enter the
+    core as ordinary synced tracker items (ADR-0014). The ``fail_*`` knobs
+    script emission failures for the crash-recovery walkthroughs.
+    """
 
     def __init__(self) -> None:
         self.items: list[TrackerItem] = []
         self.intents: list[TrackerIntent] = []
         self.pushed_states: list[tuple[str, NodeState]] = []
         self.comments: list[tuple[str, str]] = []
+        self.created: list[tuple[str, str, tuple[str, ...], str | None]] = []
+        """(external_key, body, labels, parent_key) per create_item call."""
+        self.body_updates: list[tuple[str, str]] = []
+        self.mirrored: list[tuple[str, tuple[str, ...]]] = []
+        self.fail_after_creates: int | None = None
+        """Raise on create_item once this many items exist (None = never)."""
+        self.fail_after_body_updates: int | None = None
+        self.fail_mirror: bool = False
+        self.record_created_items: bool = True
+        """False scripts the created-but-unrecorded crash window: the ticket
+        exists on the tracker but create_item dies before returning."""
+        self._next_number = 100
 
     def fetch_nodes(self, cursor: str | None) -> tuple[list[TrackerItem], str | None]:
         del cursor
@@ -54,6 +74,50 @@ class FakeTracker:
 
     def push_comment(self, external_key: str, text: str) -> None:
         self.comments.append((external_key, text))
+
+    def create_item(
+        self,
+        title: str,
+        body: str,
+        labels: tuple[str, ...] = (),
+        parent_key: str | None = None,
+    ) -> str:
+        if self.fail_after_creates is not None and len(self.created) >= self.fail_after_creates:
+            raise RuntimeError("scripted tracker failure on create_item")
+        self._next_number += 1
+        key = f"#{self._next_number}"
+        self.items.append(TrackerItem(provider="github", external_key=key, title=title, body=body))
+        if not self.record_created_items:
+            raise RuntimeError("scripted crash after the tracker created the item")
+        self.created.append((key, body, labels, parent_key))
+        return key
+
+    def update_body(self, external_key: str, body: str) -> None:
+        if (
+            self.fail_after_body_updates is not None
+            and len(self.body_updates) >= self.fail_after_body_updates
+        ):
+            raise RuntimeError("scripted tracker failure on update_body")
+        for i, item in enumerate(self.items):
+            if item.external_key == external_key:
+                self.items[i] = TrackerItem(
+                    provider=item.provider,
+                    external_key=item.external_key,
+                    title=item.title,
+                    body=body,
+                    etag=item.etag,
+                    closed=item.closed,
+                    updated_at=item.updated_at,
+                )
+                break
+        else:
+            raise RuntimeError(f"update_body on unknown item {external_key}")
+        self.body_updates.append((external_key, body))
+
+    def mirror_dependencies(self, external_key: str, depends_on: tuple[str, ...]) -> None:
+        if self.fail_mirror:
+            raise RuntimeError("scripted mirror failure")
+        self.mirrored.append((external_key, depends_on))
 
     def capabilities(self) -> TrackerCapabilities:
         return TrackerCapabilities()
@@ -230,3 +294,32 @@ class FakeCodeHost:
 
     def post_comment(self, pr_number: int, text: str) -> None:
         self.comments.append((pr_number, text))
+
+
+class FakeSynthesizer:
+    """Scriptable PlanSynthesizer: queue Plan results or exceptions.
+
+    Records every request so tests assert exactly what synthesis was a
+    function of — the stateless-turn property of ADR-0014.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[SynthesisRequest | RevisionRequest] = []
+        self._results: deque[Plan | Exception] = deque()
+
+    def script(self, *results: Plan | Exception) -> None:
+        self._results.extend(results)
+
+    def synthesize(self, request: SynthesisRequest) -> Plan:
+        return self._next(request)
+
+    def revise(self, request: RevisionRequest) -> Plan:
+        return self._next(request)
+
+    def _next(self, request: SynthesisRequest | RevisionRequest) -> Plan:
+        self.requests.append(request)
+        assert self._results, "FakeSynthesizer: no scripted result left"
+        result = self._results.popleft()
+        if isinstance(result, Exception):
+            raise result
+        return result

@@ -15,6 +15,24 @@
   crossing the boundary, because the alternative — adapters resolving it —
   would force adapters to read the store, which this ADR forbids. The
   canonical graph still never stores vendor keys (ADR-0007).
+- Revision 2026-08-27 (planner, ADR-0014): TrackerPort widened with exactly
+  three methods for plan emission —
+  `create_item(title, body, labels=(), parent_key=None) -> external_key`,
+  `update_body(external_key, body)`, and
+  `mirror_dependencies(external_key, depends_on)` (the write-only native
+  mirror of ADR-0007; `parent_key` is the cosmetic hierarchy mirror). All
+  take or return tracker-native keys per the revision above; adapters still
+  translate and never decide — emission idempotency lives with the caller.
+  The package layout gains `src/ticketflow/planner/` (the offline phase; no
+  vendor SDK and no model client inside it). pydantic-ai is treated as
+  model-API vendor surface: its import is confined to
+  `src/ticketflow/adapters/pydanticai_synthesis.py`, which implements the
+  planner-internal `PlanSynthesizer` Protocol — a seam inside the planner
+  package, NOT a fourth port; the port count stays exactly three.
+  `claude_cli_synthesis` implements the same Protocol over the headless
+  CLI (no vendor SDK import; the subprocess is its vendor surface). The
+  no-model rule for `orchestrator`/`graph`/`store` remains ADR-0008's
+  canonical bullet.
 
 ## Context
 
@@ -40,7 +58,11 @@ are normative.
 
 - **TrackerPort**: `fetch_nodes(cursor)`, `fetch_intents(cursor)`,
   `push_state(external_key, state)`, `push_comment(external_key, text)`,
-  `capabilities()` (key-based per the revision above).
+  `create_item(title, body, labels=(), parent_key=None)`,
+  `update_body(external_key, body)`,
+  `mirror_dependencies(external_key, depends_on)`,
+  `capabilities()` (key-based per the revisions above; the last three exist
+  for plan emission, ADR-0014).
 - **RunnerPort**: `start(node, workspace, policy)`, `poll(handle)`,
   `resume(handle, feedback)`, `cancel(handle)`, `capabilities()`.
 - **CodeHostPort**: `open_pr(branch, title, body)`, `get_pr_status(pr)`,
@@ -69,7 +91,7 @@ The orchestrator is deterministic Python. No model runs in the scheduling loop
 decide what runs next.
 
 Lay the packages out as
-`src/ticketflow/{domain,store,graph,orchestrator,ports,supervision,cli,adapters/{github_tracker,jira_tracker,github_codehost,claude_runner}}`.
+`src/ticketflow/{domain,store,graph,orchestrator,planner,ports,supervision,cli,adapters/{github_tracker,jira_tracker,github_codehost,claude_runner,pydanticai_synthesis,claude_cli_synthesis}}`.
 Tests exercise the core through in-memory fakes — `FakeTracker`, `FakeRunner`,
 `FakeCodeHost` — implementing the same port interfaces the real adapters do.
 
@@ -97,7 +119,9 @@ Tests exercise the core through in-memory fakes — `FakeTracker`, `FakeRunner`,
 ## Review guidance
 
 - Flag any import of a vendor SDK (`githubkit`, `atlassian-python-api`,
-  `claude-agent-sdk`, `github-copilot-sdk`) outside `src/ticketflow/adapters/`.
+  `claude-agent-sdk`, `github-copilot-sdk`) outside `src/ticketflow/adapters/`,
+  and any `pydantic_ai` import outside `src/ticketflow/adapters/` (revision
+  above).
 - Flag any vendor SDK type appearing in a port method signature under
   `src/ticketflow/ports/` or in `src/ticketflow/domain/`.
 - Flag any change to the method set or signatures of TrackerPort, RunnerPort,

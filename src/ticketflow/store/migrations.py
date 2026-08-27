@@ -110,6 +110,52 @@ MIGRATIONS: tuple[str, ...] = (
     """
     ALTER TABLE nodes ADD COLUMN crash_count INTEGER NOT NULL DEFAULT 0;
     """,
+    # 4: planner tables (ADR-0014). `plans` is lifecycle state, one live plan
+    # per epic (the partial unique index; a re-plan after discard is a new
+    # row). `plan_revisions` is append-only byte-exact YAML — SQLite is truth,
+    # plans/<epic-key>.yaml is a working copy. `plan_emitted_items` is the
+    # emission ledger whose primary key IS the (plan id, item index)
+    # idempotency key; there is no delete path for any of these rows.
+    """
+    CREATE TABLE plans (
+        plan_id               TEXT PRIMARY KEY,
+        provider              TEXT NOT NULL,
+        epic_key              TEXT NOT NULL,
+        status                TEXT NOT NULL DEFAULT 'ingested',
+        current_revision      INTEGER NOT NULL DEFAULT 0,
+        approved_revision     INTEGER,
+        grounding_attempts    INTEGER NOT NULL DEFAULT 0,
+        grounding_pid         INTEGER,
+        grounding_create_time REAL,
+        session_id            TEXT,
+        brief                 TEXT,
+        discard_reason        TEXT,
+        created_at            TEXT NOT NULL,
+        updated_at            TEXT NOT NULL
+    );
+
+    CREATE UNIQUE INDEX idx_plans_active ON plans(provider, epic_key)
+        WHERE status NOT IN ('emitted', 'discarded');
+
+    CREATE TABLE plan_revisions (
+        plan_id    TEXT NOT NULL REFERENCES plans(plan_id),
+        revision   INTEGER NOT NULL,
+        source     TEXT NOT NULL,
+        yaml       TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (plan_id, revision)
+    );
+
+    CREATE TABLE plan_emitted_items (
+        plan_id          TEXT NOT NULL REFERENCES plans(plan_id),
+        item_index       INTEGER NOT NULL,
+        external_key     TEXT NOT NULL,
+        created_at       TEXT NOT NULL,
+        edges_written_at TEXT,
+        mirrored_at      TEXT,
+        PRIMARY KEY (plan_id, item_index)
+    );
+    """,
 )
 
 

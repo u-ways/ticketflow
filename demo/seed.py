@@ -117,6 +117,20 @@ EPIC: tuple[Ticket, ...] = (
 )
 
 
+EPIC_TITLE = "qacalc: a tiny, tested calculator package"
+EPIC_BODY = """\
+We want a small Python package called `qacalc` in this repository: the four
+basic arithmetic operations (add, subtract, multiply, divide — with sane
+zero-division behaviour), exposed both as a typed Python API and as a command
+line (`qacalc add 2 3` prints `5`). It needs pytest coverage, a GitHub
+Actions workflow running the tests on every push and pull request, and a
+README whose examples match the shipped code.
+
+No structure is prescribed here — deliverables should land as small,
+independently mergeable changes. Keep tooling minimal.
+"""
+
+
 def render_body(ticket: Ticket, refs: dict[str, str]) -> str:
     """Ticket body plus its depends-on/scope grammar lines (ADR-0007)."""
     lines = [ticket.body, ""]
@@ -171,29 +185,53 @@ def seed_github(repo: str, project_owner: str | None, project_number: int | None
     print(f"\nSeeded {len(EPIC)} issues in {repo}. Point ticketflow at it and run.")
 
 
-def reset_github(repo: str, state_dir: Path | None) -> None:
-    raw = gh(
+def seed_epic_github(repo: str, project_owner: str | None, project_number: int | None) -> None:
+    """Seed ONE underspecified epic for the planner demo (ADR-0014)."""
+    gh("label", "create", DEMO_LABEL, "-R", repo, "--force", "--color", "5319e7")
+    url = gh(
         "issue",
-        "list",
+        "create",
         "-R",
         repo,
+        "--title",
+        EPIC_TITLE,
+        "--body",
+        EPIC_BODY,
         "--label",
         DEMO_LABEL,
-        "--state",
-        "open",
-        "--json",
-        "number",
     )
-    for item in json.loads(raw or "[]"):
-        gh(
-            "issue",
-            "close",
-            str(item["number"]),
-            "-R",
-            repo,
-            "-c",
-            "Closed by demo reset.",
-        )
+    key = "#" + url.rstrip("/").rsplit("/", 1)[-1]
+    print(f"created epic {key}  {EPIC_TITLE}")
+    if project_owner and project_number:
+        try:
+            gh("project", "item-add", str(project_number), "--owner", project_owner, "--url", url)
+            print(f"  added to project {project_owner}/{project_number}")
+        except subprocess.CalledProcessError as exc:
+            print(f"  project add skipped: {exc.stderr.strip()}", file=sys.stderr)
+    print(
+        f"\nNow let the planner decompose it:\n"
+        f"  uv run ticketflow plan new '{key}'          # ground + propose, then review\n"
+        f"  uv run ticketflow plan new '{key}' --yolo   # ...or approve and emit in one go"
+    )
+
+
+def _demo_issue(labels: list[str]) -> bool:
+    return any(label == DEMO_LABEL or label.startswith("tf-plan-") for label in labels)
+
+
+def reset_github(repo: str, state_dir: Path | None) -> None:
+    raw = gh(
+        "api",
+        f"repos/{repo}/issues?state=open&per_page=100",
+        "--paginate",
+        "--jq",
+        ".[] | {number, labels: [.labels[].name], pr: (.pull_request != null)}",
+    )
+    for line in filter(None, raw.splitlines()):
+        item = json.loads(line)
+        if item["pr"] or not _demo_issue(item["labels"]):
+            continue
+        gh("issue", "close", str(item["number"]), "-R", repo, "-c", "Closed by demo reset.")
         print(f"closed #{item['number']}")
 
     refs_raw = gh("api", f"repos/{repo}/git/matching-refs/heads/tf/", "--jq", ".[].ref")
@@ -248,6 +286,33 @@ def jira_credentials(args: argparse.Namespace) -> tuple[str, str]:
             "ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN."
         )
     return email, token
+
+
+def seed_epic_jira(base_url: str, project: str, email: str, token: str) -> None:
+    """Seed ONE underspecified epic for the planner demo (ADR-0014)."""
+    created = jira_call(
+        base_url,
+        email,
+        token,
+        "POST",
+        "/rest/api/2/issue",
+        {
+            "fields": {
+                "project": {"key": project},
+                "summary": EPIC_TITLE,
+                "description": EPIC_BODY,
+                "issuetype": {"name": "Task"},
+                "labels": [DEMO_LABEL],
+            }
+        },
+    )
+    key = str(created["key"])
+    print(f"created epic {key}  {EPIC_TITLE}")
+    print(
+        f"\nNow let the planner decompose it:\n"
+        f"  uv run ticketflow plan new {key}          # ground + propose, then review\n"
+        f"  uv run ticketflow plan new {key} --yolo   # ...or approve and emit in one go"
+    )
 
 
 def seed_jira(base_url: str, project: str, email: str, token: str) -> None:
@@ -322,6 +387,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
 
+    seed_epic_gh = commands.add_parser(
+        "seed-epic-github", help="Create ONE underspecified epic for the planner demo."
+    )
+    seed_epic_gh.add_argument("--repo", required=True)
+    seed_epic_gh.add_argument("--project-owner")
+    seed_epic_gh.add_argument("--project-number", type=int)
+
     seed_gh = commands.add_parser("seed-github", help="Create the demo epic as GitHub issues.")
     seed_gh.add_argument("--repo", required=True, help="owner/name of the sandbox repo")
     seed_gh.add_argument("--project-owner", help="Projects v2 board owner (optional)")
@@ -332,8 +404,11 @@ def main() -> None:
     reset_gh.add_argument("--state-dir", type=Path, help="local ticketflow state dir to remove")
 
     seed_jr = commands.add_parser("seed-jira", help="Create the demo epic as Jira issues.")
+    seed_epic_jr = commands.add_parser(
+        "seed-epic-jira", help="Create ONE underspecified epic for the planner demo."
+    )
     reset_jr = commands.add_parser("reset-jira", help="Move demo issues to Done (or delete).")
-    for sub in (seed_jr, reset_jr):
+    for sub in (seed_jr, seed_epic_jr, reset_jr):
         sub.add_argument("--base-url", required=True, help="https://<site>.atlassian.net")
         sub.add_argument("--project", required=True, help="Jira project key")
         sub.add_argument("--email")
@@ -343,6 +418,11 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "seed-github":
         seed_github(args.repo, args.project_owner, args.project_number)
+    elif args.command == "seed-epic-github":
+        seed_epic_github(args.repo, args.project_owner, args.project_number)
+    elif args.command == "seed-epic-jira":
+        email, token = jira_credentials(args)
+        seed_epic_jira(args.base_url, args.project, email, token)
     elif args.command == "reset-github":
         reset_github(args.repo, args.state_dir)
     elif args.command == "seed-jira":

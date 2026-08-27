@@ -12,6 +12,7 @@ stub client and never hit the network; no vendor SDK type crosses the port
 boundary (ADR-0002 review guidance).
 """
 
+import contextlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,6 +24,8 @@ from ticketflow.ports.tracker import TrackerCapabilities, TrackerIntent, Tracker
 
 _PROVIDER = "github"
 _PER_PAGE = 100
+_PLAN_LABEL_COLOR = "ededed"
+"""Neutral colour for planner-emitted ``tf-plan-*`` labels (ADR-0014)."""
 
 _STATE_LABELS: dict[NodeState, str] = {state: f"tf:{state.value}" for state in NodeState}
 _STATE_LABEL_NAMES = frozenset(_STATE_LABELS.values())
@@ -98,6 +101,36 @@ mutation ($project: ID!, $item: ID!, $field: ID!, $option: String!) {
 }
 """
 
+_BLOCKED_FIELD_ORG_QUERY = """
+query ($owner: String!, $number: Int!) {
+  organization(login: $owner) {
+    projectV2(number: $number) {
+      id
+      field(name: "Blocked by") { ... on ProjectV2Field { id } }
+    }
+  }
+}
+"""
+
+_BLOCKED_FIELD_USER_QUERY = """
+query ($owner: String!, $number: Int!) {
+  user(login: $owner) {
+    projectV2(number: $number) {
+      id
+      field(name: "Blocked by") { ... on ProjectV2Field { id } }
+    }
+  }
+}
+"""
+
+_UPDATE_TEXT_MUTATION = """
+mutation ($project: ID!, $item: ID!, $field: ID!, $text: String!) {
+  updateProjectV2ItemFieldValue(
+    input: {projectId: $project, itemId: $item, fieldId: $field, value: {text: $text}}
+  ) { projectV2Item { id } }
+}
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class _ProjectV2:
@@ -152,6 +185,8 @@ class GitHubTracker:
             self._client = GitHub(token) if token else GitHub()
         self._project_loaded = False
         self._project: _ProjectV2 | None = None
+        self._blocked_field_loaded = False
+        self._blocked_field: tuple[str, str] | None = None
 
     # -- TrackerPort ---------------------------------------------------------
 
@@ -240,10 +275,55 @@ class GitHubTracker:
         """Post a comment on the issue behind the external key."""
         self._create_comment(_issue_number(external_key), text)
 
+    def create_item(
+        self,
+        title: str,
+        body: str,
+        labels: tuple[str, ...] = (),
+        parent_key: str | None = None,
+    ) -> str:
+        """Create an issue for plan emission (ADR-0014); returns ``#N``.
+
+        The sub-issue attach under ``parent_key`` is a cosmetic hierarchy
+        mirror, best-effort like the Projects Status projection — a failure
+        never fails the creation the ledger is about to record.
+        """
+        for label in labels:
+            self._ensure_label(label, _PLAN_LABEL_COLOR)
+        issue = self._create_issue(title, body, list(labels))
+        if parent_key is not None:
+            with contextlib.suppress(Exception):
+                self._add_sub_issue(_issue_number(parent_key), int(issue.id))
+        return f"#{issue.number}"
+
+    def update_body(self, external_key: str, body: str) -> None:
+        """Replace the issue body (emission phase 2: depends-on lines)."""
+        self._update_issue_body(_issue_number(external_key), body)
+
+    def mirror_dependencies(self, external_key: str, depends_on: tuple[str, ...]) -> None:
+        """Mirror ``depends-on`` as native issue relationships (ADR-0007).
+
+        Native-first: the GA issue-dependencies REST endpoint adds a
+        ``blocked by`` relationship per upstream. Where that is unavailable
+        the configured Projects v2 board's "Blocked by" text field is the
+        fallback convention. Write-only either way — the body stays truth.
+        """
+        if not depends_on:
+            return
+        number = _issue_number(external_key)
+        try:
+            for key in depends_on:
+                self._add_blocked_by(number, self._issue_db_id(_issue_number(key)))
+        except Exception as exc:
+            if self._project_configured() and self._push_blocked_field(number, depends_on):
+                return
+            raise RuntimeError(f"could not mirror dependencies for {external_key}") from exc
+
     def capabilities(self) -> TrackerCapabilities:
-        """GitHub Issues: no native links; state field iff a board is set."""
+        """GitHub Issues: native blocked-by relationships (GA 2025); state
+        field iff a board is set."""
         return TrackerCapabilities(
-            native_dependency_links=False,
+            native_dependency_links=True,
             custom_state_field=self._project_configured(),
             supports_comments=True,
         )
@@ -294,6 +374,49 @@ class GitHubTracker:
                 project_id=str(project["id"]), field_id=str(status["id"]), options=options
             )
             return self._project
+        return None
+
+    def _push_blocked_field(self, number: int, keys: tuple[str, ...]) -> bool:
+        """Fallback mirror: the board's "Blocked by" text field, if it exists."""
+        field = self._load_blocked_by_field()
+        if field is None:
+            return False
+        project_id, field_id = field
+        item_id = self._find_project_item(number, project_id)
+        if item_id is None:
+            return False
+        try:
+            self._graphql(
+                _UPDATE_TEXT_MUTATION,
+                {
+                    "project": project_id,
+                    "item": item_id,
+                    "field": field_id,
+                    "text": ", ".join(keys),
+                },
+            )
+        except Exception:
+            return False
+        return True
+
+    def _load_blocked_by_field(self) -> tuple[str, str] | None:
+        """Resolve and cache the board's "Blocked by" text field, if any."""
+        if self._blocked_field_loaded:
+            return self._blocked_field
+        self._blocked_field_loaded = True
+        variables = {"owner": self._config.project_owner, "number": self._config.project_number}
+        for query in (_BLOCKED_FIELD_ORG_QUERY, _BLOCKED_FIELD_USER_QUERY):
+            try:
+                data = self._graphql(query, variables)
+            except Exception:
+                continue  # this owner kind does not exist; try the other
+            holder = (data.get("organization") or data.get("user")) if data else None
+            project = holder.get("projectV2") if holder else None
+            field = project.get("field") if project else None
+            if not project or not field or "id" not in field:
+                continue
+            self._blocked_field = (str(project["id"]), str(field["id"]))
+            return self._blocked_field
         return None
 
     def _find_project_item(self, number: int, project_id: str) -> str | None:
@@ -376,3 +499,34 @@ class GitHubTracker:
     def _create_comment(self, number: int, text: str) -> None:
         rest: Any = self._client.rest
         rest.issues.create_comment(self._owner, self._repo, number, body=text)
+
+    def _create_issue(self, title: str, body: str, labels: list[str]) -> Any:
+        rest: Any = self._client.rest
+        return rest.issues.create(
+            self._owner, self._repo, title=title, body=body, labels=labels
+        ).parsed_data
+
+    def _update_issue_body(self, number: int, body: str) -> None:
+        rest: Any = self._client.rest
+        rest.issues.update(self._owner, self._repo, number, body=body)
+
+    def _issue_db_id(self, number: int) -> int:
+        """The issue's database id — what the relationship endpoints take."""
+        return int(self._get_issue(number).id)
+
+    def _add_blocked_by(self, number: int, blocker_id: int) -> None:
+        """Native issue dependency: ``number`` is blocked by ``blocker_id``."""
+        client: Any = self._client
+        client.request(
+            "POST",
+            f"/repos/{self._owner}/{self._repo}/issues/{number}/dependencies/blocked_by",
+            json={"issue_id": blocker_id},
+        )
+
+    def _add_sub_issue(self, parent_number: int, child_id: int) -> None:
+        client: Any = self._client
+        client.request(
+            "POST",
+            f"/repos/{self._owner}/{self._repo}/issues/{parent_number}/sub_issues",
+            json={"sub_issue_id": child_id},
+        )

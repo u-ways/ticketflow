@@ -32,11 +32,15 @@ workflow steps that bypass them (ADR-0012).
 
 ## Layout
 
-- `src/ticketflow/domain/` — canonical types, transition table, body parser
+- `src/ticketflow/domain/` — canonical types, transition tables, body parser
 - `src/ticketflow/store/` — SQLite store (WAL, sequential migrations)
 - `src/ticketflow/graph/` — ready-set/cycle/stagger pure functions
 - `src/ticketflow/orchestrator/` — the reconcile tick and prompts
+- `src/ticketflow/planner/` — the offline plan lifecycle (ADR-0014): ground,
+  synthesize, review, approve, emit — driven by `ticketflow plan` turns; no
+  model client in the package (`pydantic_ai` lives only in its adapter)
 - `src/ticketflow/ports/` — the three port protocols (exactly three)
-- `src/ticketflow/adapters/` — vendor adapters (the only SDK imports)
+- `src/ticketflow/adapters/` — vendor adapters (the only SDK and model-API
+  imports, `pydantic_ai` included)
 - `src/ticketflow/supervision/` — detached processes, run dirs, worktrees
 - `tests/fakes.py` — port fakes; core tests never mock vendor SDKs

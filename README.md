@@ -21,6 +21,11 @@ provides.
 - **The orchestrator is not an agent.** Scheduling is deterministic Python: a
   topological ready-set ([`graphlib`](https://docs.python.org/3/library/graphlib.html)),
   a lease table, and a reconcile tick. No model runs in the scheduling loop.
+- **Epics are decomposed by an offline planner.** `ticketflow plan` grounds an
+  epic, proposes child items with evidence-backed dependency edges, and — only
+  after a human approves the reviewable `plans/<epic-key>.yaml` — emits them as
+  ordinary tickets with `depends-on:` lines. The scheduler reads that graph
+  exactly as it reads a human-authored one.
 - **SQLite is truth.** Boards, traces and status views are projections and may lag.
 - **Agents run as detached processes** in their own git worktrees, surviving
   orchestrator restarts. Startup adopts in-flight work; it does not clean it up.
@@ -40,6 +45,14 @@ reset. See [demo/README.md](demo/README.md).
 just demo seed-github --repo owner/sandbox
 uv run ticketflow run --config ticketflow.toml --yolo
 just demo reset-github --repo owner/sandbox --state-dir .ticketflow
+```
+
+To plan an epic instead of hand-writing its tickets:
+
+```sh
+ticketflow plan new '#42'        # ground + synthesize; writes plans/42.yaml
+ticketflow plan show '#42'       # edges ascending by confidence, with evidence
+ticketflow plan approve '#42' && ticketflow plan emit '#42'
 ```
 
 ## Development

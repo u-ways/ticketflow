@@ -2,6 +2,14 @@
 
 - Status: Accepted
 - Date: 2026-08-27
+- Revision 2026-08-27 (planner, ADR-0014): grounding attempts add two kill
+  paths of their own, both planner-turn-owned: a re-dispatched grounding
+  turn cancels its predecessor's still-live agent (turns are exclusive and
+  the orphan's brief will never be read — evented
+  `plan_grounding_superseded`), and the foreground turn's KeyboardInterrupt
+  handler cancels the detached agent it was polling. Node attempts are
+  untouched: their only kill paths remain the runaway guard and the cancel
+  intent.
 
 ## Context
 
@@ -102,8 +110,10 @@ the optional systemd upgrade.
   exit-code → checks → `git diff --stat` order, with escalation on a clean
   exit with an empty diff.
 - Flag any kill path for a running agent other than the wall-clock or token
-  runaway guard, or a cancel intent routed through the intents table
-  (ADR-0004) into `RunnerPort.cancel` (ADR-0011).
+  runaway guard, a cancel intent routed through the intents table
+  (ADR-0004) into `RunnerPort.cancel` (ADR-0011), or the two grounding-turn
+  paths of the revision above (supersede on re-dispatch; foreground
+  interrupt).
 - Flag retention changes that delete artifacts of a non-terminal run, drop
   events from the event log, or alter the 14-day/10 GB, 12-month or 500 MB
   values without updating this ADR.

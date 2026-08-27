@@ -64,3 +64,47 @@ def test_invalid_provider_rejected() -> None:
 def test_yolo_is_not_a_config_field() -> None:
     # ADR-0013: the yolo flag is per-run, never persisted configuration.
     assert "yolo" not in Config.model_fields
+
+
+def test_planner_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "ticketflow.toml"
+    path.write_text(
+        """
+[tracker]
+provider = "github"
+repo = "u-ways/qa"
+
+[codehost]
+repo = "u-ways/qa"
+"""
+    )
+    config = load_config(path)
+    assert config.planner.synthesis_model is None
+    assert config.planner.grounding_allowed_tools == ("Read", "Grep", "Glob", "Write")
+    assert config.planner.synthesis_backend == "pydantic-ai"
+    assert config.planner.synthesis_max_retries == 3
+    assert config.plans_dir == Path("plans")
+
+
+def test_planner_toml_overrides(tmp_path: Path) -> None:
+    path = tmp_path / "ticketflow.toml"
+    path.write_text(
+        """
+plans_dir = "docs/plans"
+
+[tracker]
+provider = "github"
+repo = "u-ways/qa"
+
+[codehost]
+repo = "u-ways/qa"
+
+[planner]
+synthesis_model = "claude-sonnet-5"
+grounding_timeout_seconds = 600
+"""
+    )
+    config = load_config(path)
+    assert config.planner.synthesis_model == "claude-sonnet-5"
+    assert config.planner.grounding_timeout_seconds == 600
+    assert config.plans_dir == Path("docs/plans")

@@ -86,7 +86,7 @@ installing a tool made a repo safe. The repo makes the repo safe.
 
 ## 2. Invariants
 
-These four hold everywhere. If a change violates one, the change is wrong.
+These five hold everywhere. If a change violates one, the change is wrong.
 
 1. **SQLite is truth.** Boards, traces and the TUI are projections and may lag.
 2. **All human signals enter through the intents table**, whatever the source.
@@ -104,6 +104,10 @@ flowchart TD
     JIRA[Jira adapter] --> TP[Tracker port]
     GHI[GitHub Issues adapter] --> TP
     TP --> CORE
+
+    PLAN[Planner CLI<br/>ground, synthesize, emit] --> TP
+    PLAN --> RP
+    PLAN <--> DB
 
     subgraph CORE [Vendor-agnostic core]
         ORCH[Orchestrator<br/>scheduler + reconciler]
@@ -127,6 +131,12 @@ Three ports, so the core never learns a vendor's vocabulary. GitHub gets two
 independent adapters — one for tracking, one for code hosting — which is what
 allows Jira-for-planning plus GitHub-for-code.
 
+The planner (§13) sits outside the core: an offline phase sharing the same
+ports and the same database. It grounds through the runner port, stores plan
+state in its own SQLite tables, and emits approved child tickets through the
+tracker port. It never talks to the orchestrator — its output re-enters the
+core only as ordinary synced tracker items.
+
 **The orchestrator is not an agent.** It is deterministic Python: a topological
 ready-set, a lease table, and a reconcile tick. No model runs in the scheduling
 loop. Reproducibility is what makes crash-recovery, idempotency and unit tests
@@ -144,12 +154,18 @@ flowchart TD
     J[Jira] --> INT[Intents table]
     G[GitHub] --> INT
     T[TUI actions] --> INT
+    PC[Planner CLI<br/>plan approve / reject] --> INT
     INT --> CORE[Orchestrator + SQLite]
     CORE --> LOG[Event log<br/>append-only]
     LOG --> TA[Tracker adapters<br/>board projection]
     LOG --> OT[OTel tailer<br/>spans per attempt]
     LOG --> TUI[TUI<br/>read-only views]
 ```
+
+Plan approval is just another human signal converging on the same table: the
+CLI writes a `plan_approve`/`plan_reject` intent, the planner turn consumes
+it (the tick leaves the `plan_` namespace pending), and planner events flow
+into the same log.
 
 The TUI is not privileged. When it grows a retry button, that button writes an
 intent, exactly like a Jira status move does. One path for "a human asked for
@@ -174,9 +190,11 @@ something" is what stops the TUI becoming a second orchestrator.
 depends-on: PROJ-41, PROJ-38
 ```
 
-Both trackers store this identically. Native Jira links and GitHub sub-issues
-are a *mirror* for human readability, written by the adapter, never read as
-truth. This means someone editing links in the Jira UI cannot corrupt the DAG.
+Both trackers store this identically. Native Jira links and GitHub
+relationships/sub-issues are a *mirror* for human readability, written by the
+adapter (the planner's emit path writes them for emitted children, §13.7),
+never read as truth. This means someone editing links in the Jira UI cannot
+corrupt the DAG.
 
 ---
 
@@ -256,8 +274,17 @@ fetch_nodes(cursor)      -> canonical nodes since last sync
 fetch_intents(cursor)    -> normalized human signals
 push_state(node, state)
 push_comment(node, text)
+create_item(title, body, labels, parent_key) -> external_key
+update_body(node, body)
+mirror_dependencies(node, depends_on)
 capabilities()           -> what this backend can actually do
 ```
+
+The last three exist for plan emission (§13.7): creation returns the
+tracker-assigned key, bodies are rewritten with `depends-on:` lines only
+after every key exists, and `mirror_dependencies` writes the backend's
+native mirror — Jira `is blocked by` links; GitHub blocked-by relationships,
+falling back to a Projects v2 "Blocked by" field — write-only, per §5.
 
 Backends are unequal, so the core asks rather than assumes:
 
@@ -737,8 +764,15 @@ stateDiagram-v2
     InReview --> InReview: human and agent revise together
     InReview --> Emitting: human approves
     InReview --> Discarded: human rejects
-    Emitting --> [*]: child tickets written to tracker
+    Emitting --> Emitted: every item and edge exists
+    Emitting --> Discarded: approval retracted, emission ledger still empty
+    Emitted --> [*]
+    Discarded --> [*]
 ```
+
+`Emitting → Discarded` exists only to retract an approval nothing has acted
+on: once any item is emitted there is no rollback — re-running emit is the
+recovery path (§13.7, ADR-0014).
 
 **A long pause is not a long run.** The planner completes in minutes. Approval
 may take days, during which no process is resident — the proposal lives in
@@ -756,7 +790,7 @@ not cosmetic — the two halves want different abstractions.
 
 | Phase | Does | Runs on | Output |
 |---|---|---|---|
-| **Grounding** | Reads the repo, linked docs, related tickets | Agent SDK via `RunnerPort` | Research brief |
+| **Grounding** | Reads the repo, linked docs, related tickets | `RunnerPort` (headless CLI adapters, ADR-0011) | Research brief |
 | **Synthesis** | Turns brief + raw ticket into the plan | PydanticAI | Validated plan schema |
 
 **Grounding scope: baseline plus agent judgement.** Direct dependencies always
@@ -777,11 +811,12 @@ upstream of everything else, so the gates exist before the work they judge. This
 is a strong default rather than a rule; the human approving the plan can
 reorder it.
 
-**Why split.** Grounding is tool-using exploration, which both agent SDKs do
-natively — and it reuses the `RunnerPort` abstraction, so Claude or Copilot both
-work with no new bridge. Synthesis needs no tools at all, so it is a pure
-function of its inputs: model-agnostic, cheap, and unit-testable against
-recorded briefs as fixtures.
+**Why split.** Grounding is tool-using exploration, which the runner
+adapters do natively — and it reuses the `RunnerPort` abstraction, so Claude
+or Copilot both work with no new bridge; the brief is captured as `brief.md`
+at the workspace root, the same file pattern as handoffs. Synthesis needs no
+tools at all, so it is a pure function of its inputs: model-agnostic, cheap,
+and unit-testable against recorded briefs as fixtures.
 
 **Why not one phase.** PydanticAI abstracts *model APIs*; the Copilot SDK is an
 *agent runtime* driving a CLI over JSON-RPC. They do not compose. There is no
@@ -855,6 +890,15 @@ file and writes an approval intent, per §4.
    is the only way to answer "is the planner improving" without guessing, and it
    feeds the §13.2 thresholds directly.
 
+**Implementation status.** All three rules ship in v1, because they bind the
+hand-edit path, not just the conversational one. The shipping surface is the
+`ticketflow plan` CLI: `$EDITOR` on the YAML with mandatory revalidation
+(`plan edit` / `plan validate`), plus `plan revise --feedback` — a stateless
+synthesis turn over (current YAML, feedback, brief), which is what makes the
+review resumable across days with no session state. The TUI session host is
+not yet built; because the plan is a file and approval is an intent, it can
+land later without touching plan state.
+
 ### 13.6 Planning completes before execution
 
 There is no mid-execution re-planning. The graph is materialized at approval and
@@ -886,9 +930,40 @@ epic that looks approved but is not schedulable.
 - **Emit is resumable.** Record each created item as it succeeds; on retry, skip
   what already exists.
 - **The plan is not marked emitted until every item and edge exists.** Until
-  then its children are invisible to the scheduler.
+  then its children are invisible to the scheduler: they sync as ordinary
+  nodes but the `tf-plan:` marker holds them Blocked — a hold neither the
+  ready-set nor an `unblock` intent may bypass — until the plan reads
+  emitted.
 - **Emit before edges.** Create all items first, then link dependencies, so a
   failure never leaves an edge pointing at a ticket that does not exist.
+
+The emission pipeline, end to end:
+
+```mermaid
+sequenceDiagram
+    participant H as Human / --yolo
+    participant I as Intents table
+    participant P as Planner turn
+    participant T as Tracker port
+    participant O as Orchestrator sync
+
+    H->>I: plan_approve (revision + content digest)
+    P->>I: consume (processed_at guard)
+    P->>P: pin approved revision, log first-vs-approved diff
+    P->>T: adoption sweep (re-read tf-plan markers)
+    loop every item, in index order
+        P->>T: create_item (marker, no depends-on)
+        P->>P: ledger row = (plan id, item index)
+    end
+    loop every dependent item
+        P->>T: update_body (depends-on with real keys)
+    end
+    loop best-effort
+        P->>T: mirror_dependencies (native links / board field)
+    end
+    P->>P: status = emitted (only now)
+    O->>T: ordinary sync adopts children; hold released
+```
 
 **On permanent failure, leave the partials.** No rollback. Deleting tickets is
 destructive, often not permitted by the tracker, and throws away the evidence of

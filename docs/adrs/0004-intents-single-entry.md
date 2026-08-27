@@ -2,6 +2,18 @@
 
 - Status: Accepted
 - Date: 2026-08-27
+- Revision 2026-08-27 (planner, ADR-0014): the type set gains
+  `plan_approve` and `plan_reject`. They are plan-scoped, not node-scoped:
+  `node_id` stays NULL and the payload carries `plan_id`, the approved
+  `revision`, and its `yaml_sha256` content digest; `external_id`
+  (`plan_approve:<plan_id>:<revision>`) dedupes double submission. The
+  `plan_` namespace is consumed by the planner CLI turn under the same
+  `processed_at` guard — the orchestrator tick must leave these intents
+  pending, silently, or a running orchestrator would swallow an approval as
+  `intent_unhandled` before the planner ever saw it. Under `--yolo` the
+  auto-approval writes the same intent row (ADR-0013): one path in, always.
+  (The unknown-intent canary tests use the hyphenated `approve-plan`, which
+  the underscore namespace deliberately does not match.)
 
 ## Context
 
@@ -29,9 +41,10 @@ intent and the node re-enters the state machine (spec §6, ADR-0006).
 Every human signal, whatever its source, converges on the `intents` table.
 
 - Support the intent types `approve`, `reject`, `unblock`, `cancel`, `retry`
-  and `resume`. A Jira status move, a GitHub label, a CLI command and a future
-  TUI button all write the same normalized intent row; the source surface is
-  irrelevant to the core.
+  and `resume`, plus the plan-scoped `plan_approve` and `plan_reject`
+  (revision above). A Jira status move, a GitHub label, a CLI command and a
+  future TUI button all write the same normalized intent row; the source
+  surface is irrelevant to the core.
 - No component may mutate node state directly in response to a human action.
   Tracker adapters, the code host adapter, the CLI and the TUI translate human
   actions into intent rows and stop there. The orchestrator consumes pending
@@ -49,7 +62,7 @@ Every human signal, whatever its source, converges on the `intents` table.
   node by writing an intent, which re-enters the state machine at `Ready`
   (ADR-0006). `resume` after provider quota exhaustion is an intent like any
   other human signal (spec §12.3).
-- Route the future planner's plan approval through the same table (ADR-0014).
+- Route the planner's plan approval through the same table (ADR-0014).
   Because intents live in SQLite (ADR-0003), an approval gate survives reboots,
   version upgrades, and a human editing the proposal by hand — which is why no
   in-process checkpointer (e.g. LangGraph's `interrupt()`) is used (spec §13.4).
@@ -94,7 +107,12 @@ Harder or deferred:
 - Flag intent-consumption code that lacks a guard on `processed_at` (processing
   must skip already-processed rows so re-runs are no-ops).
 - Flag new intent type strings outside the set {approve, reject, unblock,
-  cancel, retry, resume} unless the diff also updates this ADR.
+  cancel, retry, resume, plan_approve, plan_reject} unless the diff also
+  updates this ADR.
+- Flag orchestrator tick code that consumes, marks processed, or events an
+  intent whose type starts with `plan_` — that namespace is the planner
+  turn's to consume (revision above); and flag planner intent consumption
+  that lacks the `processed_at` guard.
 - Require escalation-resolution and quota-resume paths to be implemented as
   intent writes, not as direct state mutation or ad-hoc re-dispatch.
 - Require any new human-facing surface (TUI screen, CLI subcommand, web

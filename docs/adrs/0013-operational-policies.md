@@ -2,6 +2,9 @@
 
 - Status: Accepted
 - Date: 2026-08-27
+- Revision 2026-08-27: the planner is implemented (ADR-0014); wording
+  updated below, no rule change. Yolo's plan auto-approval writes the same
+  `plan_approve` intent row a human approval does (ADR-0004).
 
 ## Context
 
@@ -25,8 +28,8 @@ handoff artifact rather than transitive history (spec §12.2).
 
 **Yolo mode.** `--yolo` does exactly two things and nothing else:
 
-- Auto-approve the plan, when the planner exists (ADR-0014): the review session
-  of spec §13.5 is skipped entirely.
+- Auto-approve the plan (ADR-0014): the review session of spec §13.5 is
+  skipped entirely.
 - Run agents without permission prompts: no `ToolPolicy` is consulted, and the
   agent is never asked to confirm a tool call.
 
