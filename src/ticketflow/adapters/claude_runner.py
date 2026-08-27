@@ -99,6 +99,30 @@ def _parse_stream(stdout: str) -> tuple[str | None, float | None]:
     return session_id, cost
 
 
+def _output_tokens_from_stream(stdout: str) -> int:
+    """Sum output tokens reported by the stream's usage payloads (ADR-0010).
+
+    The token half of the runaway guard: it terminates a stuck loop, it does
+    not manage spend (ADR-0013).
+    """
+    total = 0
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event: dict[str, Any] = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = event.get("message")
+        usage = message.get("usage") if isinstance(message, dict) else event.get("usage")
+        if isinstance(usage, dict):
+            tokens = usage.get("output_tokens")
+            if isinstance(tokens, int):
+                total += tokens
+    return total
+
+
 def _classify_failure(stdout: str, stderr: str) -> FailureClass:
     """Map a non-zero exit to QUOTA or ERROR (ADR-0011).
 
@@ -136,11 +160,15 @@ class ClaudeRunner:
         limits: Limits,
         clock: Callable[[], datetime],
         binary: str = "claude",
+        yolo: bool = False,
     ) -> None:
         self._config = runner_config
         self._limits = limits
         self._clock = clock
         self._binary = binary
+        self._yolo = yolo
+        """Per-run flag (ADR-0013): resume compiles the same policy start
+        received, so a yolo run never regains permission prompts mid-loop."""
 
     def start(self, node: NodeDispatch, workspace: Path, policy: ToolPolicy) -> RunnerHandle:
         """Spawn one detached attempt; the prompt is recorded in the run dir."""
@@ -189,7 +217,13 @@ class ClaudeRunner:
             started_at = datetime.fromisoformat(str(meta["started_at"]))
             elapsed = (self._clock() - started_at).total_seconds()
             if elapsed > self._limits.attempt_timeout_seconds:
-                return PollResult(status=AttemptStatus.TIMED_OUT)
+                return PollResult(status=AttemptStatus.TIMED_OUT, guard_reason="wall-clock timeout")
+            tokens = _output_tokens_from_stream(_read_log(run_dir.stdout_path))
+            if tokens > self._limits.attempt_token_ceiling:
+                return PollResult(
+                    status=AttemptStatus.TIMED_OUT,
+                    guard_reason=f"token ceiling exceeded ({tokens} output tokens)",
+                )
             return PollResult(status=AttemptStatus.RUNNING)
         # Dead with no exit_code file: the group was SIGKILLed before the
         # wrapper could record the code (ADR-0010) — synthesize a crash.
@@ -210,6 +244,7 @@ class ClaudeRunner:
         policy = ToolPolicy(
             allowed_tools=self._config.allowed_tools,
             disallowed_tools=self._config.disallowed_tools,
+            yolo=self._yolo,
         )
         command = build_command(
             feedback,

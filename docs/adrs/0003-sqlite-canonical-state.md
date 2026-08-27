@@ -9,6 +9,11 @@
   holds, and per-cycle check re-run records. `kv` never carries canonical
   node state (states, edges, leases, attempts live in their own tables); its
   values are operational marks that are either reconstructible or advisory.
+  One narrow write exception accompanies the reader rule: intent ingress
+  (ADR-0004). CLI/TUI commands may append rows to the **intents table only**
+  — that is precisely how a human signal enters — serialized against the
+  single orchestrator writer by WAL and busy_timeout. Status views open
+  read-only connections and every other table stays orchestrator-only.
 - Date: 2026-08-27
 
 ## Context

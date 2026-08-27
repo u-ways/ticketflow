@@ -16,6 +16,7 @@ from ticketflow.ports.runner import (
     AttemptStatus,
     FailureClass,
     NodeDispatch,
+    PollResult,
     RunnerHandle,
     ToolPolicy,
 )
@@ -291,3 +292,61 @@ class TestCancelAndCapabilities:
         capabilities = runner.capabilities()
         assert capabilities.supports_resume
         assert capabilities.reports_cost
+
+
+class TestRunawayTokenCeiling:
+    def test_poll_reports_token_ceiling_breach(self, tmp_path: Path) -> None:
+        # ADR-0010: the guard has a token half too. The fake prints usage
+        # payloads then sleeps; a tiny ceiling must trip TIMED_OUT.
+        fake = make_fake_claude(
+            tmp_path,
+            'echo \'{"type":"system","subtype":"init","session_id":"s1"}\'\n'
+            'echo \'{"type":"assistant","message":{"usage":{"output_tokens":50}}}\'\n'
+            'echo \'{"type":"assistant","message":{"usage":{"output_tokens":60}}}\'\n'
+            "sleep 30\n",
+        )
+        limits = Limits(attempt_timeout_seconds=3600, attempt_token_ceiling=100)
+        runner = ClaudeRunner(RunnerConfig(), limits, lambda: datetime.now(UTC), binary=str(fake))
+        node = NodeDispatch(node_id="n1", attempt=1, prompt="go", run_dir=tmp_path / "run")
+        handle = runner.start(node, tmp_path, ToolPolicy())
+        try:
+
+            def timed_out() -> PollResult | None:
+                candidate = runner.poll(handle)
+                return candidate if candidate.status is AttemptStatus.TIMED_OUT else None
+
+            result = wait_for(timed_out)
+            assert isinstance(result, PollResult)
+            assert result.guard_reason is not None
+            assert "token ceiling" in result.guard_reason
+        finally:
+            runner.cancel(handle)
+
+
+class TestResumeKeepsYolo:
+    def test_resume_compiles_yolo_policy(self, tmp_path: Path) -> None:
+        # ADR-0013: a yolo run never regains permission prompts mid-loop.
+        fake = make_fake_claude(tmp_path, "echo '{}'\n")
+        runner = ClaudeRunner(
+            RunnerConfig(), Limits(), lambda: datetime.now(UTC), binary=str(fake), yolo=True
+        )
+        template = RunnerHandle(
+            node_id="n1",
+            attempt=2,
+            pid=0,
+            create_time=0.0,
+            run_dir=tmp_path / "run2",
+            session_id="sess-1",
+            workspace=tmp_path,
+        )
+        runner.resume(template, "fix it")
+        recorded = (tmp_path / "run2" / "prompt.md").read_text()
+        assert recorded == "fix it"
+        command = build_command(
+            "fix it",
+            model=None,
+            policy=ToolPolicy(yolo=True),
+            resume_session="sess-1",
+            binary=str(fake),
+        )
+        assert "--dangerously-skip-permissions" in command

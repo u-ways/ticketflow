@@ -29,6 +29,11 @@ def open_store(config: Config) -> Store:
     return Store.open(config.db_path)
 
 
+def open_store_read_only(config: Config) -> Store:
+    """Read-only connection for status views (ADR-0003)."""
+    return Store.open_read_only(config.db_path)
+
+
 def build_tracker(config: Config) -> TrackerPort:
     if config.tracker.provider == "jira":
         from ticketflow.adapters.jira_tracker import JiraTracker
@@ -62,7 +67,7 @@ def build_orchestrator(
     return Orchestrator(
         store=store,
         tracker=build_tracker(config),
-        runner=ClaudeRunner(config.runner, config.limits, clock),
+        runner=ClaudeRunner(config.runner, config.limits, clock, yolo=yolo),
         codehost=GitHubCodeHost(config.codehost.repo, token=github_token()),
         workspaces=workspaces,
         config=config,

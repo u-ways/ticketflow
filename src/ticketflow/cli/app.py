@@ -7,13 +7,16 @@ read-only projections of the store (ADR-0003).
 
 import time
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 
 import ticketflow
 from ticketflow.config import Config, load_config
 from ticketflow.domain.model import NodeState
+
+if TYPE_CHECKING:
+    from ticketflow.store.store import Store
 
 app = typer.Typer(
     name="ticketflow",
@@ -50,6 +53,23 @@ cycle_cap = 100
 max_attempts = 3
 halt_ticks = 10
 """
+
+
+def _open_read_only(config_path: Path) -> Store | None:
+    """Open the state store read-only (ADR-0003); None when no state exists."""
+    import sqlite3
+
+    from ticketflow.cli.factory import open_store_read_only
+
+    cfg = _load(config_path)
+    if not cfg.db_path.is_file():
+        typer.echo("No state yet: the orchestrator has not run.")
+        return None
+    try:
+        return open_store_read_only(cfg)
+    except sqlite3.OperationalError as exc:
+        typer.echo(f"Cannot open state store: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
 
 
 def _load(config_path: Path) -> Config:
@@ -129,9 +149,9 @@ def run(
 @app.command()
 def status(config: ConfigOption = DEFAULT_CONFIG) -> None:
     """Show every node and its state (read-only)."""
-    from ticketflow.cli.factory import open_store
-
-    store = open_store(_load(config))
+    store = _open_read_only(config)
+    if store is None:
+        return
     try:
         nodes = store.list_nodes()
         if not nodes:
@@ -152,9 +172,9 @@ def status(config: ConfigOption = DEFAULT_CONFIG) -> None:
 @app.command()
 def escalations(config: ConfigOption = DEFAULT_CONFIG) -> None:
     """List escalated nodes and why they need a human (read-only)."""
-    from ticketflow.cli.factory import open_store
-
-    store = open_store(_load(config))
+    store = _open_read_only(config)
+    if store is None:
+        return
     try:
         nodes = store.list_nodes(state=NodeState.ESCALATED)
         if not nodes:
@@ -177,9 +197,9 @@ def events(
     limit: Annotated[int, typer.Option("--limit")] = 50,
 ) -> None:
     """Tail the append-only event log (read-only)."""
-    from ticketflow.cli.factory import open_store
-
-    store = open_store(_load(config))
+    store = _open_read_only(config)
+    if store is None:
+        return
     try:
         for event in store.events_after(after, limit=limit):
             where = f" node={event.node_id}" if event.node_id else ""

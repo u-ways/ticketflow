@@ -57,6 +57,14 @@ class Store:
         apply_migrations(conn)
         return cls(conn)
 
+    @classmethod
+    def open_read_only(cls, path: Path | str) -> Self:
+        """Reader connection for status views (ADR-0003): no writes, no DDL."""
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+        return cls(conn)
+
     def close(self) -> None:
         self._conn.close()
 

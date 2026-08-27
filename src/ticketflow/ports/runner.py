@@ -71,6 +71,8 @@ class FailureClass(StrEnum):
 @dataclass(frozen=True, slots=True)
 class PollResult:
     status: AttemptStatus
+    guard_reason: str | None = None
+    """Why the runaway guard fired, when status is TIMED_OUT."""
     exit_code: int | None = None
     failure_class: FailureClass = FailureClass.NONE
     session_id: str | None = None
