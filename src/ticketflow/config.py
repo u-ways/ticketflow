@@ -43,6 +43,9 @@ class Limits(BaseModel):
     lease_ttl_seconds: int = 900
     attempt_timeout_seconds: int = 3600
     """Per-attempt wall-clock runaway guard (ADR-0010)."""
+    attempt_token_ceiling: int = 1_000_000
+    """Per-attempt output-token runaway guard (ADR-0010). Deliberately
+    generous: it terminates a stuck loop, it does not manage spend."""
     cycle_cap: int = 100
     """Review-loop backstop, deliberately generous (ADR-0009)."""
     max_attempts: int = 3

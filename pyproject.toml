@@ -61,6 +61,11 @@ files = ["src", "tests"]
 warn_unreachable = true
 pretty = true
 
+[[tool.mypy.overrides]]
+# atlassian-python-api ships no py.typed marker; the adapter casts at its seam.
+module = ["atlassian.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-markers -ra -m 'not e2e'"

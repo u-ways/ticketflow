@@ -466,7 +466,12 @@ class Orchestrator:
                     attempt.node_id, attempt.attempt, status="timed_out", finished_at=now
                 )
                 self._store.release_lease(attempt.node_id)
-                self._escalate(node, "wall-clock timeout", report)
+                self._escalate(
+                    node,
+                    result.guard_reason or "wall-clock timeout",
+                    report,
+                    attempt=attempt.attempt,
+                )
                 continue
 
             # Exited.
