@@ -26,6 +26,48 @@ from ticketflow.ports.tracker import TrackerCapabilities, TrackerIntent, Tracker
 _PROVIDER = "jira"
 _PAGE_SIZE = 100
 _NODE_FIELDS = "summary,description,status,updated"
+
+
+def _description_text(description: object) -> str:
+    """Normalize a Jira description to plain text.
+
+    REST v2 returns a string; Jira Cloud's v3 endpoints return an Atlassian
+    Document Format tree (a dict). The depends-on/scope grammar (ADR-0007)
+    needs plain lines either way, so ADF is flattened: text nodes joined,
+    block-level nodes separated by newlines. Found by the live E2E smoke —
+    the adapter must translate at its boundary, whatever the API version.
+    """
+    if description is None:
+        return ""
+    if isinstance(description, str):
+        return description
+    if isinstance(description, dict):
+        lines: list[str] = []
+
+        def walk(node: dict[str, object]) -> None:
+            if node.get("type") == "text":
+                text = node.get("text")
+                if isinstance(text, str):
+                    if lines:
+                        lines[-1] += text
+                    else:
+                        lines.append(text)
+            elif node.get("type") == "hardBreak":
+                lines.append("")
+            content = node.get("content")
+            if isinstance(content, list):
+                block = node.get("type") in ("paragraph", "heading", "listItem", "codeBlock")
+                if block:
+                    lines.append("")
+                for child in content:
+                    if isinstance(child, dict):
+                        walk(child)
+
+        walk(description)
+        return "\n".join(line for line in lines if line is not None).strip()
+    return str(description)
+
+
 _INTENT_FIELDS = "labels,updated"
 _INTENT_LABELS = ("tf-retry", "tf-resume", "tf-unblock", "tf-cancel", "tf-approve", "tf-reject")
 _ESCALATED_LABEL = "tf-escalated"
@@ -76,8 +118,7 @@ class JiraTracker:
                     provider=_PROVIDER,
                     external_key=issue["key"],
                     title=fields["summary"],
-                    # REST v2 returns the description as plain text.
-                    body=fields["description"] or "",
+                    body=_description_text(fields["description"]),
                     etag=fields["updated"],
                     closed=fields["status"]["statusCategory"]["key"] == "done",
                     updated_at=updated_at,

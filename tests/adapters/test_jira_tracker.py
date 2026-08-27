@@ -297,3 +297,59 @@ class TestCapabilities:
         assert caps.native_dependency_links is True
         assert caps.custom_state_field is True
         assert caps.supports_comments is True
+
+
+class TestAdfDescription:
+    def test_v3_adf_description_is_flattened_to_lines(self) -> None:
+        # Jira Cloud v3 returns ADF; the depends-on grammar needs plain lines.
+        from ticketflow.adapters.jira_tracker import _description_text
+
+        adf = {
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "Do the thing."}]},
+                {
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": "depends-on: KAN-9, KAN-10"}],
+                },
+                {"type": "paragraph", "content": [{"type": "text", "text": "scope: src/"}]},
+            ],
+        }
+        text = _description_text(adf)
+        from ticketflow.domain.parser import parse_body
+
+        parsed = parse_body(text)
+        assert parsed.depends_on == ("KAN-9", "KAN-10")
+        assert parsed.scope == ("src/",)
+
+    def test_plain_string_and_none_pass_through(self) -> None:
+        from ticketflow.adapters.jira_tracker import _description_text
+
+        assert _description_text("plain") == "plain"
+        assert _description_text(None) == ""
+
+    def test_hard_breaks_split_lines(self) -> None:
+        # A single paragraph with hardBreak nodes (how Jira stores literal
+        # newlines) must still yield one grammar line per break.
+        from ticketflow.adapters.jira_tracker import _description_text
+        from ticketflow.domain.parser import parse_body
+
+        adf = {
+            "type": "doc",
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [
+                        {"type": "text", "text": "Intro."},
+                        {"type": "hardBreak"},
+                        {"type": "text", "text": "depends-on: KAN-9"},
+                        {"type": "hardBreak"},
+                        {"type": "text", "text": "scope: src/"},
+                    ],
+                }
+            ],
+        }
+        parsed = parse_body(_description_text(adf))
+        assert parsed.depends_on == ("KAN-9",)
+        assert parsed.scope == ("src/",)
