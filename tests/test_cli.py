@@ -3,6 +3,7 @@
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 import ticketflow
@@ -138,3 +139,60 @@ class TestIntentCommands:
         kinds = [i.intent_type for i in store.unprocessed_intents()]
         store.close()
         assert kinds == ["cancel", "unblock"]
+
+
+class TestRunResilience:
+    """A transient adapter error must not kill the loop (found live: one
+    flaky GitHub response crashed a run mid-epic)."""
+
+    class _Store:
+        def close(self) -> None: ...
+
+    @staticmethod
+    def _wire(monkeypatch: pytest.MonkeyPatch, orchestrator: object) -> None:
+        import ticketflow.cli.factory as factory
+
+        monkeypatch.setattr(factory, "open_store", lambda _cfg: TestRunResilience._Store())
+        monkeypatch.setattr(
+            factory,
+            "build_orchestrator",
+            lambda _cfg, _store, *, yolo=False: orchestrator,  # noqa: ARG005
+        )
+
+    def test_transient_tick_errors_are_survived(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ticketflow.orchestrator.core import TickReport
+
+        class Flaky:
+            calls = 0
+
+            def adopt(self) -> None: ...
+
+            def tick(self) -> TickReport:
+                Flaky.calls += 1
+                if Flaky.calls <= 2:
+                    raise RuntimeError("server disconnected")
+                return TickReport(halted=True)  # clean exit path for the test
+
+        self._wire(monkeypatch, Flaky())
+        config_path = write_config(tmp_path)
+        result = runner.invoke(app, ["run", "--config", str(config_path), "--interval", "0"])
+        assert Flaky.calls == 3  # two failures survived, then the halt
+        assert result.exit_code == 3  # the halt, not the errors
+        assert "tick failed" in result.output
+
+    def test_persistent_tick_errors_stop_the_loop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class Broken:
+            def adopt(self) -> None: ...
+
+            def tick(self) -> None:
+                raise RuntimeError("hard down")
+
+        self._wire(monkeypatch, Broken())
+        config_path = write_config(tmp_path)
+        result = runner.invoke(app, ["run", "--config", str(config_path), "--interval", "0"])
+        assert result.exit_code == 4
+        assert "5 consecutive" in result.output

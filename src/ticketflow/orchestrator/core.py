@@ -416,21 +416,27 @@ class Orchestrator:
     # -- step 3: reconcile running attempts --------------------------------
 
     def _reconcile_attempts(self, report: TickReport) -> None:
-        # Poll first, expire after (ADR-0010 adoption: re-attach live ones,
-        # harvest finished ones, expire the rest). Polling extends live
-        # leases and harvests finished attempts — including attempts that
-        # finished while the orchestrator was down — so the expiry sweep
-        # below only ever sees nodes with nothing pollable left.
-        for attempt in self._store.running_attempts():
+        # Node-driven, poll first, expire after (ADR-0010 adoption: re-attach
+        # live ones, harvest finished ones, expire the rest). Every active
+        # node's current attempt is polled — a row already terminal but with
+        # the node state unadvanced is an interrupted harvest (a crash landed
+        # between the observation and the transition) and is resumed, not
+        # abandoned. The expiry sweep below only ever sees nodes with nothing
+        # pollable left.
+        active = self._store.list_nodes(state=NodeState.IN_PROGRESS) + self._store.list_nodes(
+            state=NodeState.ADDRESSING_FEEDBACK
+        )
+        for node in active:
+            attempt = self._store.get_attempt(node.node_id, node.attempt_count)
+            if attempt is None or attempt.status in ("aborted", "cancelled", "timed_out"):
+                continue  # nothing pollable: the expiry backstop owns it
             now = self._clock()
-            node = self._store.get_node(attempt.node_id)
-            if node is None:
-                continue
+            first_observation = attempt.status == "running"
             result = self._runner.poll(self._handle_from_attempt(attempt))
 
             if result.status is AttemptStatus.RUNNING:
                 self._store.extend_lease(
-                    attempt.node_id,
+                    node.node_id,
                     ttl_seconds=self._config.limits.lease_ttl_seconds,
                     now=now,
                 )
@@ -439,9 +445,9 @@ class Orchestrator:
             if result.status is AttemptStatus.TIMED_OUT:
                 self._runner.cancel(self._handle_from_attempt(attempt))
                 self._store.update_attempt(
-                    attempt.node_id, attempt.attempt, status="timed_out", finished_at=now
+                    node.node_id, attempt.attempt, status="timed_out", finished_at=now
                 )
-                self._store.release_lease(attempt.node_id)
+                self._store.release_lease(node.node_id)
                 self._escalate(
                     node,
                     result.guard_reason or "wall-clock timeout",
@@ -450,24 +456,26 @@ class Orchestrator:
                 )
                 continue
 
-            # Exited.
-            self._store.update_attempt(
-                attempt.node_id,
-                attempt.attempt,
-                status="exited",
-                exit_code=result.exit_code,
-                session_id=result.session_id,
-                finished_at=now,
-            )
-            self._store.release_lease(attempt.node_id)
-            if result.cost is not None:
-                self._store.append_event(
-                    "attempt_cost",
-                    now=now,
-                    node_id=attempt.node_id,
-                    attempt=attempt.attempt,
-                    payload={"cost": result.cost},
+            # Exited (possibly re-observed while resuming an interrupted
+            # harvest: the runner's cached result makes re-polling safe).
+            if first_observation:
+                self._store.update_attempt(
+                    node.node_id,
+                    attempt.attempt,
+                    status="exited",
+                    exit_code=result.exit_code,
+                    session_id=result.session_id,
+                    finished_at=now,
                 )
+                if result.cost is not None:
+                    self._store.append_event(
+                        "attempt_cost",
+                        now=now,
+                        node_id=node.node_id,
+                        attempt=attempt.attempt,
+                        payload={"cost": result.cost},
+                    )
+            self._store.release_lease(node.node_id)
 
             if result.exit_code == 0:
                 self._harvest_success(node, attempt.attempt, report)
@@ -476,8 +484,8 @@ class Orchestrator:
 
         now = self._clock()
         for node_id in self._store.expire_stale_leases(now=now):
-            node = self._store.get_node(node_id)
-            if node is None or node.state is not NodeState.IN_PROGRESS:
+            stale_node = self._store.get_node(node_id)
+            if stale_node is None or stale_node.state is not NodeState.IN_PROGRESS:
                 continue
             # Backstop: the node is active but nothing pollable remains (its
             # process kept dying before an attempt could even be recorded).
@@ -487,14 +495,17 @@ class Orchestrator:
                 "lease_expired",
                 now=now,
                 node_id=node_id,
-                attempt=node.attempt_count or None,
+                attempt=stale_node.attempt_count or None,
             )
             if expiries >= self._config.limits.max_attempts:
                 # ADR-0006 trigger: repeated lease expiry.
-                self._escalate(node, f"repeated lease expiry ({expiries})", report)
+                self._escalate(stale_node, f"repeated lease expiry ({expiries})", report)
             else:
                 self._store.set_state(
-                    node_id, NodeState.READY, now=now, attempt=node.attempt_count or None
+                    node_id,
+                    NodeState.READY,
+                    now=now,
+                    attempt=stale_node.attempt_count or None,
                 )
 
     def _harvest_success(self, node: Node, attempt: int, report: TickReport) -> None:

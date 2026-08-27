@@ -183,6 +183,32 @@ class TestHarvest:
         assert h.state_of("#1") is NodeState.IN_PROGRESS
         assert len(h.runner.started) == 1
 
+    def test_interrupted_harvest_resumes_on_next_tick(self, h: Harness) -> None:
+        # A crash can land between "attempt observed exited" and the state
+        # transition (e.g. a network error while opening the PR). The next
+        # tick must resume the harvest from the terminal attempt row — the
+        # node must never wedge in_progress with its work already done.
+        h.add_item("#1", "Work")
+        h.orchestrator.tick()
+        node_id = h.node_id_for("#1")
+        h.codehost.branches.add(branch_for(node_id))
+        # Simulate the interrupted first observation: row already terminal,
+        # lease already released, but the node state never advanced.
+        h.store.update_attempt(
+            node_id,
+            1,
+            status="exited",
+            exit_code=0,
+            session_id="sess-1",
+            finished_at=h.clock(),
+        )
+        h.store.release_lease(node_id)
+        h.runner.script_exit(node_id, 1, exit_code=0)  # cached re-poll result
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.AWAITING_SIGNALS
+        assert len(h.codehost.opened) == 1
+        assert len(h.runner.started) == 1  # resumed, not redispatched
+
     def test_lease_expiry_backstop_escalates_unpollable_nodes_when_repeated(
         self, h: Harness
     ) -> None:

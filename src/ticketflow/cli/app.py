@@ -121,11 +121,26 @@ def run(
             err=True,
         )
     store = open_store(cfg)
+    consecutive_failures = 0
     try:
         orchestrator = build_orchestrator(cfg, store, yolo=yolo)
         orchestrator.adopt()
         while True:
-            report = orchestrator.tick()
+            try:
+                report = orchestrator.tick()
+            except Exception as exc:
+                # A flaky tracker/code-host response must not kill a
+                # long-running loop; persistent failure still stops it.
+                consecutive_failures += 1
+                typer.echo(f"tick failed ({exc}); continuing.", err=True)
+                if consecutive_failures >= 5:
+                    typer.echo("5 consecutive tick failures; stopping.", err=True)
+                    raise typer.Exit(code=4) from exc
+                if once:
+                    raise typer.Exit(code=4) from exc
+                time.sleep(interval)
+                continue
+            consecutive_failures = 0
             typer.echo(
                 f"tick: synced={report.synced} intents={report.intents_processed} "
                 f"dispatched={report.dispatched} settled={report.settled} "
