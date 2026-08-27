@@ -299,12 +299,22 @@ class TestHandoffs:
 
 class TestCheckStats:
     def test_flake_rate(self, store: Store) -> None:
-        store.record_check_outcome("pytest", flaked=False)
-        store.record_check_outcome("pytest", flaked=True)
-        store.record_check_outcome("pytest", flaked=False)
-        store.record_check_outcome("pytest", flaked=False)
+        store.record_check_outcome("pytest", flaked=False, now=T0)
+        store.record_check_outcome("pytest", flaked=True, now=at(1))
+        store.record_check_outcome("pytest", flaked=False, now=at(2))
+        store.record_check_outcome("pytest", flaked=False, now=at(3))
         assert store.flake_rate("pytest") == pytest.approx(0.25)
         assert store.flake_rate("unknown-check") == 0.0
+
+    def test_each_observation_is_evented(self, store: Store) -> None:
+        # ADR-0005: a check observation and its event are one unit of work.
+        make_node(store, "n1")
+        store.record_check_outcome("ci", flaked=True, now=T0, node_id="n1", attempt=2)
+        events = [e for e in store.events_after(0) if e.kind == "check_observed"]
+        assert len(events) == 1
+        assert events[0].node_id == "n1"
+        assert events[0].attempt == 2
+        assert events[0].payload == {"check": "ci", "flaked": True}
 
 
 class TestAtomicity:

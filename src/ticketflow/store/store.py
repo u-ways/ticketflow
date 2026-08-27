@@ -568,15 +568,33 @@ class Store:
 
     # -- per-check flake tracking (ADR-0009) ------------------------------
 
-    def record_check_outcome(self, check_name: str, *, flaked: bool) -> None:
-        self._conn.execute(
-            """
-            INSERT INTO check_stats (check_name, runs, flakes) VALUES (?, 1, ?)
-            ON CONFLICT (check_name)
-            DO UPDATE SET runs = runs + 1, flakes = flakes + excluded.flakes
-            """,
-            (check_name, 1 if flaked else 0),
-        )
+    def record_check_outcome(
+        self,
+        check_name: str,
+        *,
+        flaked: bool,
+        now: datetime,
+        node_id: str | None = None,
+        attempt: int | None = None,
+    ) -> None:
+        """Record one check observation: flake counter and event row are one
+        unit of work (ADR-0005, ADR-0009)."""
+        with self._txn():
+            self._conn.execute(
+                """
+                INSERT INTO check_stats (check_name, runs, flakes) VALUES (?, 1, ?)
+                ON CONFLICT (check_name)
+                DO UPDATE SET runs = runs + 1, flakes = flakes + excluded.flakes
+                """,
+                (check_name, 1 if flaked else 0),
+            )
+            self._append_event_row(
+                kind="check_observed",
+                now=now,
+                node_id=node_id,
+                attempt=attempt,
+                payload={"check": check_name, "flaked": flaked},
+            )
 
     def flake_rate(self, check_name: str) -> float:
         row = self._conn.execute(
