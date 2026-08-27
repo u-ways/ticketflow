@@ -207,6 +207,9 @@ class Store:
     def bump_cycle_count(self, node_id: str, *, now: datetime) -> int:
         return self._bump(node_id, "cycle_count", now)
 
+    def bump_crash_count(self, node_id: str, *, now: datetime) -> int:
+        return self._bump(node_id, "crash_count", now)
+
     def _bump(self, node_id: str, column: str, now: datetime) -> int:
         self._require_node(node_id)
         row = self._conn.execute(
@@ -219,10 +222,16 @@ class Store:
         return int(row[0])
 
     def reset_counters(self, node_id: str, *, now: datetime) -> None:
+        """Reset the failure budgets (crash and cycle counters).
+
+        Attempt numbering is deliberately NOT reset: it is monotonic so the
+        (node, attempt) idempotency key (ADR-0008) and run directories are
+        never reused (ADR-0006 revision).
+        """
         self._require_node(node_id)
         self._conn.execute(
             """
-            UPDATE nodes SET attempt_count = 0, cycle_count = 0, updated_at = ?
+            UPDATE nodes SET crash_count = 0, cycle_count = 0, updated_at = ?
             WHERE node_id = ?
             """,
             (_iso(now), node_id),
@@ -238,6 +247,7 @@ class Store:
             blocked_reason=row["blocked_reason"],
             attempt_count=row["attempt_count"],
             cycle_count=row["cycle_count"],
+            crash_count=row["crash_count"],
             scope_hints=tuple(json.loads(row["scope_hints"])),
             created_at=_from_iso(row["created_at"]),
             updated_at=_from_iso(row["updated_at"]),

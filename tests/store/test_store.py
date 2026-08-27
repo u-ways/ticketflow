@@ -120,11 +120,15 @@ class TestNodes:
         assert store.bump_attempt_count("n1", now=at(1)) == 1
         assert store.bump_attempt_count("n1", now=at(2)) == 2
         assert store.bump_cycle_count("n1", now=at(3)) == 1
-        store.reset_counters("n1", now=at(4))
+        assert store.bump_crash_count("n1", now=at(4)) == 1
+        store.reset_counters("n1", now=at(5))
         node = store.get_node("n1")
         assert node is not None
-        assert node.attempt_count == 0
+        # Failure budgets reset; attempt numbering stays monotonic (ADR-0006
+        # revision / ADR-0008 idempotency key integrity).
+        assert node.attempt_count == 2
         assert node.cycle_count == 0
+        assert node.crash_count == 0
 
 
 class TestExternalRefs:

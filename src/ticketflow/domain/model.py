@@ -45,6 +45,7 @@ class Node:
     blocked_reason: str | None = None
     attempt_count: int = 0
     cycle_count: int = 0
+    crash_count: int = 0
     scope_hints: tuple[str, ...] = ()
     created_at: datetime | None = None
     updated_at: datetime | None = None

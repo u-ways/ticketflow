@@ -157,18 +157,52 @@ class TestHarvest:
         assert h.state_of("#1") is NodeState.ESCALATED
         assert len(h.runner.cancelled) == 1
 
-    def test_lease_expiry_rolls_back_then_escalates_when_repeated(self, h: Harness) -> None:
-        # ADR-0006: lease expiry rolls back to Ready; REPEATED expiry is an
-        # escalation trigger, not an infinite re-dispatch loop.
+    def test_finished_attempt_is_harvested_even_after_lease_expiry(self, h: Harness) -> None:
+        # ADR-0010 adoption: "re-attach live ones, harvest finished ones,
+        # expire the rest". An attempt that finished while the orchestrator
+        # was down must be harvested on the next tick — never aborted and
+        # redispatched.
         h.add_item("#1", "Work")
         h.orchestrator.tick()
         node_id = h.node_id_for("#1")
-        for round_no in range(1, 3):
+        h.runner.script_exit(node_id, 1, exit_code=0)
+        h.codehost.branches.add(branch_for(node_id))
+        h.clock.advance(h.config.limits.lease_ttl_seconds + 120)  # downtime
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.AWAITING_SIGNALS
+        assert len(h.codehost.opened) == 1
+        assert len(h.runner.started) == 1  # no redispatch
+
+    def test_live_attempt_reattaches_after_downtime(self, h: Harness) -> None:
+        # A still-running attempt found after downtime is re-attached (lease
+        # renewed), not expired back to Ready.
+        h.add_item("#1", "Work")
+        h.orchestrator.tick()
+        h.clock.advance(h.config.limits.lease_ttl_seconds + 120)  # downtime
+        h.orchestrator.tick()  # runner fake reports RUNNING
+        assert h.state_of("#1") is NodeState.IN_PROGRESS
+        assert len(h.runner.started) == 1
+
+    def test_lease_expiry_backstop_escalates_unpollable_nodes_when_repeated(
+        self, h: Harness
+    ) -> None:
+        # ADR-0006: repeated lease expiry escalates. With poll-first
+        # reconciliation a live process renews its lease, so the backstop
+        # covers attempts that cannot be polled — a process that keeps dying
+        # before recording anything (simulated by retiring the row).
+        h.add_item("#1", "Work")
+        h.orchestrator.tick()
+        node_id = h.node_id_for("#1")
+        for round_no in range(1, h.config.limits.max_attempts + 1):
+            node = h.store.get_node(node_id)
+            assert node is not None
+            h.store.update_attempt(
+                node_id, node.attempt_count, status="aborted", finished_at=h.clock()
+            )
             h.clock.advance(h.config.limits.lease_ttl_seconds + 60)
-            h.orchestrator.tick()  # expiry round_no: back to Ready, re-dispatched
-            assert h.state_of("#1") is NodeState.IN_PROGRESS, round_no
-        h.clock.advance(h.config.limits.lease_ttl_seconds + 60)
-        h.orchestrator.tick()  # third expiry hits the repeat cap
+            h.orchestrator.tick()
+            if round_no < h.config.limits.max_attempts:
+                assert h.state_of("#1") is NodeState.IN_PROGRESS, round_no  # re-dispatched
         assert h.state_of("#1") is NodeState.ESCALATED
         node = h.store.get_node(node_id)
         assert node is not None
@@ -372,9 +406,32 @@ class TestIntents:
         assert h.state_of("#1") is NodeState.IN_PROGRESS
         node = h.store.get_node(node_id)
         assert node is not None
-        assert node.attempt_count == 1  # counters were reset before re-dispatch
+        # Attempt numbering is monotonic — never reset — so run dirs and the
+        # (node, attempt) idempotency key (ADR-0008) are never reused. What a
+        # retry resets is the failure budgets (crash/cycle counters).
+        assert node.attempt_count == 2
+        assert node.crash_count == 0
         prompt = h.runner.started[-1].dispatch.prompt
         assert "The acceptance criteria mean X, not Y." in prompt
+
+    def test_retry_resets_the_crash_budget_not_the_numbering(self, h: Harness) -> None:
+        h.add_item("#1", "Work")
+        h.orchestrator.tick()
+        node_id = h.node_id_for("#1")
+        for attempt in range(1, 4):
+            h.runner.script_exit(node_id, attempt, exit_code=1)
+            h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.ESCALATED  # crash budget spent
+        h.store.add_intent(intent_type="retry", source="cli", node_id=node_id, now=h.clock())
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.IN_PROGRESS
+        node = h.store.get_node(node_id)
+        assert node is not None
+        assert node.attempt_count == 4  # continues, no collision with rows 1-3
+        # One more crash must NOT immediately re-escalate: the budget is fresh.
+        h.runner.script_exit(node_id, 4, exit_code=1)
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.IN_PROGRESS  # crashed once, retried
 
     def test_unblock_refused_under_escalated_ancestor(self, h: Harness) -> None:
         # ADR-0006: never let dependents of an Escalated node proceed — an
