@@ -13,7 +13,9 @@ HANDOFF_INSTRUCTIONS = """\
 Before you finish, write a file named `handoff.md` at the workspace root: at
 most 300 words covering files touched, interfaces introduced or changed,
 decisions made and why, what you deliberately did NOT do, and known gotchas.
-Downstream work reads this file; write it for the next engineer."""
+Downstream work reads this file; write it for the next engineer. Do NOT
+commit `handoff.md` — it is a run artifact the orchestrator collects, not
+part of the change."""
 
 
 def build_prompt(
