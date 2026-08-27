@@ -63,6 +63,12 @@ class TestNewlyReady:
         nodes = {"z": B, "a": B, "m": B}
         assert newly_ready(nodes, edges=set()) == ("a", "m", "z")
 
+    def test_cyclic_graph_is_rejected_not_stalled(self) -> None:
+        # ADR-0008: cycle rejection is part of the ready-set path itself; a
+        # cyclic graph must raise, never silently return an empty ready set.
+        with pytest.raises(DependencyCycle):
+            newly_ready({"a": B, "b": B}, {("a", "b"), ("b", "a")})
+
 
 class TestBlockedOnEscalated:
     def test_direct_and_transitive_dependents_name_the_root(self) -> None:

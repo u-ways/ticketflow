@@ -44,7 +44,13 @@ class TestTransitionTable:
             # Ready → Escalated: cancelled, or dispatch failed irrecoverably.
             (NodeState.READY, NodeState.ESCALATED),
         }
-        assert expected == TRANSITIONS
+        assert expected == set(TRANSITIONS)
+
+    def test_every_entry_names_its_guard(self) -> None:
+        # ADR-0006: the table is (from, to, guard); the guard is a named
+        # condition enforced at the edge's single orchestrator call site.
+        for pair, guard in TRANSITIONS.items():
+            assert isinstance(guard, str) and guard, f"missing guard for {pair}"
 
     @pytest.mark.parametrize("pair", sorted(TRANSITIONS))
     def test_every_tabled_transition_is_legal(self, pair: tuple[NodeState, NodeState]) -> None:

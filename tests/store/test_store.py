@@ -305,3 +305,30 @@ class TestCheckStats:
         store.record_check_outcome("pytest", flaked=False)
         assert store.flake_rate("pytest") == pytest.approx(0.25)
         assert store.flake_rate("unknown-check") == 0.0
+
+
+class TestAtomicity:
+    def test_state_change_and_event_commit_or_roll_back_together(
+        self, store: Store, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ADR-0005: the state row and its event are one unit of work. If the
+        # event insert dies, the state change must roll back too.
+        make_node(store, "n1", NodeState.BLOCKED)
+
+        def boom(**_kwargs: object) -> int:
+            raise RuntimeError("event insert failed")
+
+        monkeypatch.setattr(store, "_append_event_row", boom)
+        with pytest.raises(RuntimeError):
+            store.set_state("n1", NodeState.READY, now=at(1))
+        node = store.get_node("n1")
+        assert node is not None
+        assert node.state is NodeState.BLOCKED  # rolled back, not half-applied
+
+    def test_state_changed_event_can_carry_the_attempt(self, store: Store) -> None:
+        # ADR-0005: events carry correlation ids from day one, so the deferred
+        # OTel tailer can link spans from recorded data alone.
+        make_node(store, "n1", NodeState.READY)
+        store.set_state("n1", NodeState.IN_PROGRESS, now=at(1), attempt=3)
+        events = [e for e in store.events_after(0) if e.kind == "state_changed"]
+        assert events[-1].attempt == 3

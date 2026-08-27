@@ -11,7 +11,8 @@ which keeps every method deterministic and unit-testable.
 
 import json
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Self
@@ -58,6 +59,20 @@ class Store:
 
     def close(self) -> None:
         self._conn.close()
+
+    @contextmanager
+    def _txn(self) -> Iterator[None]:
+        """Explicit transaction. The connection runs in autocommit mode, so
+        paired writes (a state row and its event, ADR-0005) need a real
+        BEGIN/COMMIT to be one unit of work."""
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        else:
+            self._conn.execute("COMMIT")
 
     def schema_version(self) -> int:
         row = self._conn.execute("PRAGMA user_version").fetchone()
@@ -144,11 +159,12 @@ class Store:
         *,
         now: datetime,
         reason: str | None = None,
+        attempt: int | None = None,
     ) -> Node:
         """Apply a state transition, atomically with its event (ADR-0005/0006)."""
         node = self._require_node(node_id)
         assert_legal(node.state, to_state)
-        with self._conn:
+        with self._txn():
             self._conn.execute(
                 """
                 UPDATE nodes
@@ -161,7 +177,7 @@ class Store:
                 kind="state_changed",
                 now=now,
                 node_id=node_id,
-                attempt=None,
+                attempt=attempt,
                 payload={
                     "from": node.state.value,
                     "to": to_state.value,
@@ -260,7 +276,7 @@ class Store:
     # -- edges ------------------------------------------------------------
 
     def replace_upstreams(self, node_id: str, upstream_ids: Sequence[str]) -> None:
-        with self._conn:
+        with self._txn():
             self._conn.execute("DELETE FROM edges WHERE to_node = ?", (node_id,))
             self._conn.executemany(
                 "INSERT OR IGNORE INTO edges (from_node, to_node) VALUES (?, ?)",
@@ -297,7 +313,7 @@ class Store:
         """Claim exclusively; succeeds only if no unexpired lease exists."""
         self._require_node(node_id)
         expires = _iso(now + timedelta(seconds=ttl_seconds))
-        with self._conn:
+        with self._txn():
             self._conn.execute(
                 "DELETE FROM leases WHERE node_id = ? AND expires_at <= ?",
                 (node_id, _iso(now)),
@@ -489,7 +505,7 @@ class Store:
         attempt: int | None = None,
         payload: dict[str, Any] | None = None,
     ) -> int:
-        with self._conn:
+        with self._txn():
             return self._append_event_row(
                 kind=kind, now=now, node_id=node_id, attempt=attempt, payload=payload or {}
             )
