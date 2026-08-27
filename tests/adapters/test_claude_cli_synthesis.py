@@ -30,7 +30,7 @@ BAD_DRAFT = {
 }
 
 
-def make_fake_claude(tmp_path: Path, *drafts: dict) -> str:  # type: ignore[type-arg]
+def make_fake_claude(tmp_path: Path, *drafts: dict[str, object]) -> str:
     """A fake ``claude`` that answers with each draft in turn.
 
     Emits the real CLI's ``--output-format json`` envelope; records every
