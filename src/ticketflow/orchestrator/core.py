@@ -75,6 +75,15 @@ def _k_conflict(node_id: str) -> str:
     return f"conflict_attempted:{node_id}"
 
 
+def _paths_from_diff_stat(stat: str) -> list[str]:
+    """File paths out of ``git diff --stat`` output (summary line excluded)."""
+    paths = []
+    for line in stat.splitlines():
+        if "|" in line:
+            paths.append(line.split("|")[0].strip())
+    return paths
+
+
 def derive_node_id(provider: str, external_key: str) -> str:
     """Deterministic node identity from the originating tracker item."""
     digest = hashlib.sha256(f"{provider}:{external_key}".encode()).hexdigest()
@@ -511,7 +520,20 @@ class Orchestrator:
             self._escalate(node, "clean exit, empty diff (no branch pushed)", report)
             return
         base = self._codehost.default_branch() or "main"
-        if not self._workspaces.diff_stat(node_id, attempt, base).strip():
+        stat = self._workspaces.diff_stat(node_id, attempt, base)
+        # Declared-vs-actual paths, recorded per attempt (ADR-0007): the
+        # signal that decides whether the scope-hint feature survives.
+        self._store.append_event(
+            "scope_observed",
+            now=now,
+            node_id=node_id,
+            attempt=attempt,
+            payload={
+                "declared": list(node.scope_hints),
+                "actual": _paths_from_diff_stat(stat),
+            },
+        )
+        if not stat.strip():
             # Exit code, then checks, then a NON-EMPTY diff: a pushed branch
             # identical to the base is still an empty diff (ADR-0010).
             self._escalate(node, f"clean exit, empty diff (branch identical to {base})", report)
@@ -890,7 +912,11 @@ class Orchestrator:
             now=now,
             node_id=node_id,
             attempt=next_attempt,
-            payload={"bootstrap": bootstrap, "yolo": self._yolo},
+            payload={
+                "bootstrap": bootstrap,
+                "yolo": self._yolo,
+                "scope_declared": list(node.scope_hints),
+            },
         )
         report.dispatched += 1
 

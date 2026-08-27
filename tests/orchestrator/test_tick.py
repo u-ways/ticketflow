@@ -494,3 +494,21 @@ class TestParseIssueReporting:
         assert "not a key!" in comments[0]
         events = [e for e in h.store.events_after(0) if e.kind == "body_parse_issue"]
         assert len(events) == 1
+
+
+class TestScopeRecord:
+    def test_declared_vs_actual_paths_recorded_per_attempt(self, h: Harness) -> None:
+        # ADR-0007: the record that decides whether scope hints survive.
+        h.add_item("#1", "Scoped", body="scope: src/widget.py, docs/")
+        h.orchestrator.tick()
+        node_id = h.node_id_for("#1")
+        dispatched = [e for e in h.store.events_after(0) if e.kind == "dispatched"]
+        assert dispatched[0].payload["scope_declared"] == ["src/widget.py", "docs/"]
+        h.runner.script_exit(node_id, 1, exit_code=0)
+        h.codehost.branches.add(branch_for(node_id))
+        h.orchestrator.tick()
+        observed = [e for e in h.store.events_after(0) if e.kind == "scope_observed"]
+        assert len(observed) == 1
+        assert observed[0].attempt == 1
+        assert observed[0].payload["declared"] == ["src/widget.py", "docs/"]
+        assert observed[0].payload["actual"] == ["src/widget.py"]

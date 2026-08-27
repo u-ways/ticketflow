@@ -53,7 +53,9 @@ class FakeWorkspaces:
         return path
 
     def diff_stat(self, node_id: str, attempt: int, _base_branch: str) -> str:
-        return self.diff_stats.get((node_id, attempt), " 1 file changed")
+        return self.diff_stats.get(
+            (node_id, attempt), " src/widget.py | 2 +-\n 1 file changed, 1 insertion(+)"
+        )
 
 
 @dataclass
