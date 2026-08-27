@@ -271,7 +271,13 @@ class Orchestrator:
             if node.state is NodeState.IN_PROGRESS:
                 self._cancel_running_attempt(node)
                 self._store.release_lease(node.node_id)
-                self._store.set_state(node.node_id, NodeState.ESCALATED, reason=reason, now=now)
+                self._store.set_state(
+                    node.node_id,
+                    NodeState.ESCALATED,
+                    reason=reason,
+                    now=now,
+                    attempt=node.attempt_count or None,
+                )
                 return
             if node.state in (NodeState.BLOCKED, NodeState.READY):
                 self._store.set_state(node.node_id, NodeState.ESCALATED, reason=reason, now=now)
@@ -552,7 +558,12 @@ class Orchestrator:
         if node.state is NodeState.ADDRESSING_FEEDBACK:
             # Let the settle loop re-detect the feedback and try again; the
             # cycle cap bounds this.
-            self._store.set_state(node.node_id, NodeState.AWAITING_SIGNALS, now=now)
+            self._store.set_state(
+                node.node_id,
+                NodeState.AWAITING_SIGNALS,
+                now=now,
+                attempt=node.attempt_count or None,
+            )
             return
 
         if node.attempt_count >= self._config.limits.max_attempts:
@@ -561,7 +572,9 @@ class Orchestrator:
             self._store.append_event(
                 "attempt_failed", now=now, node_id=node.node_id, attempt=node.attempt_count
             )
-            self._store.set_state(node.node_id, NodeState.READY, now=now)
+            self._store.set_state(
+                node.node_id, NodeState.READY, now=now, attempt=node.attempt_count or None
+            )
 
     # -- step 4: settle PRs -------------------------------------------------
 
