@@ -26,3 +26,6 @@ runs/
 *.swp
 .DS_Store
 requirements-audit.txt
+
+# Claude Code session worktrees
+.claude/

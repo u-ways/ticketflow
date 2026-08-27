@@ -67,14 +67,22 @@ class StartedAttempt:
 
 
 class FakeRunner:
-    """Scriptable runner: outcomes are queued per (node_id, attempt)."""
+    """Scriptable Claude-shaped runner: outcomes queued per (node_id, attempt).
+
+    A second, deliberately different fake (:class:`FakeCopilotRunner`) runs
+    the same orchestrator suite so the port cannot drift into Claude-shaped
+    assumptions (ADR-0011).
+    """
+
+    PID_BASE = 1000
+    SESSION_PREFIX = "sess"
 
     def __init__(self) -> None:
         self.started: list[StartedAttempt] = []
         self.resumed: list[tuple[RunnerHandle, str]] = []
         self.cancelled: list[RunnerHandle] = []
         self._outcomes: dict[tuple[str, int], deque[PollResult]] = {}
-        self._next_pid = 1000
+        self._next_pid = self.PID_BASE
 
     def script(self, node_id: str, attempt: int, *results: PollResult) -> None:
         self._outcomes.setdefault((node_id, attempt), deque()).extend(results)
@@ -83,7 +91,11 @@ class FakeRunner:
         self.script(
             node_id,
             attempt,
-            PollResult(status=AttemptStatus.EXITED, exit_code=exit_code, session_id="sess-1"),
+            PollResult(
+                status=AttemptStatus.EXITED,
+                exit_code=exit_code,
+                session_id=f"{self.SESSION_PREFIX}-1",
+            ),
         )
 
     def start(self, node: NodeDispatch, workspace: Path, policy: ToolPolicy) -> RunnerHandle:
@@ -121,6 +133,21 @@ class FakeRunner:
 
     def capabilities(self) -> RunnerCapabilities:
         return RunnerCapabilities(supports_resume=True)
+
+
+class FakeCopilotRunner(FakeRunner):
+    """A second runner fake with different vendor-flavoured details.
+
+    Different pid range, session-id shape, and cost semantics (a prompt
+    allowance normalized to a float at the boundary, ADR-0011). Exercised
+    against the whole orchestrator suite alongside :class:`FakeRunner`.
+    """
+
+    PID_BASE = 20_000
+    SESSION_PREFIX = "copilot-thread"
+
+    def capabilities(self) -> RunnerCapabilities:
+        return RunnerCapabilities(supports_resume=True, reports_cost=True)
 
 
 @dataclass

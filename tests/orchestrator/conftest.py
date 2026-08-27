@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.fakes import FakeCodeHost, FakeRunner, FakeTracker
+from tests.fakes import FakeCodeHost, FakeCopilotRunner, FakeRunner, FakeTracker
 from ticketflow.config import CodeHostConfig, Config, Limits, TrackerConfig
 from ticketflow.domain.model import NodeState
 from ticketflow.orchestrator.core import Orchestrator
@@ -104,11 +104,13 @@ class Harness:
             self.codehost.prs[pr_number] = FakePr(status=status)
 
 
-@pytest.fixture
-def h(tmp_path: Path) -> Iterator[Harness]:
+@pytest.fixture(params=[FakeRunner, FakeCopilotRunner], ids=["claude-like", "copilot-like"])
+def h(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Harness]:
+    # Both runner fakes drive the same suite so the port stays
+    # runner-agnostic (ADR-0011).
     store = Store.open(tmp_path / "tf.db")
     tracker = FakeTracker()
-    runner = FakeRunner()
+    runner = request.param()
     codehost = FakeCodeHost()
     workspaces = FakeWorkspaces(tmp_path / "ws")
     clock = FakeClock()

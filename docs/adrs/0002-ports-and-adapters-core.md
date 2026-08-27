@@ -9,6 +9,12 @@
   `rerun_failed_checks(pr)` and `post_comment(pr, text)` serve the merge
   ladder, flake handling and handoff comments (ADR-0009, ADR-0013). All are
   reads of, or writes to, branches and PRs only — invariant 5 is untouched.
+  TrackerPort's write methods take the tracker-native `external_key`
+  (`push_state(external_key, state)`, `push_comment(external_key, text)`):
+  the caller resolves canonical `node_id` → key via `external_refs` before
+  crossing the boundary, because the alternative — adapters resolving it —
+  would force adapters to read the store, which this ADR forbids. The
+  canonical graph still never stores vendor keys (ADR-0007).
 
 ## Context
 
@@ -33,7 +39,8 @@ Structure the core as a hexagon with exactly three ports. The signatures below
 are normative.
 
 - **TrackerPort**: `fetch_nodes(cursor)`, `fetch_intents(cursor)`,
-  `push_state(node, state)`, `push_comment(node, text)`, `capabilities()`.
+  `push_state(external_key, state)`, `push_comment(external_key, text)`,
+  `capabilities()` (key-based per the revision above).
 - **RunnerPort**: `start(node, workspace, policy)`, `poll(handle)`,
   `resume(handle, feedback)`, `cancel(handle)`, `capabilities()`.
 - **CodeHostPort**: `open_pr(branch, title, body)`, `get_pr_status(pr)`,

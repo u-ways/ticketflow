@@ -63,6 +63,10 @@ def _k_rerun(node_id: str, cycle: int) -> str:
     return f"rerun:{node_id}:{cycle}"
 
 
+def _k_unresolved(node_id: str) -> str:
+    return f"unresolved:{node_id}"
+
+
 def derive_node_id(provider: str, external_key: str) -> str:
     """Deterministic node identity from the originating tracker item."""
     digest = hashlib.sha256(f"{provider}:{external_key}".encode()).hexdigest()
@@ -216,6 +220,21 @@ class Orchestrator:
                 self._store.set_state(node.node_id, NodeState.READY, now=now)
                 return
             if kind == "unblock" and node.state is NodeState.BLOCKED:
+                if self._has_escalated_ancestor(node.node_id):
+                    # Never let dependents of an Escalated node proceed
+                    # (ADR-0006) — not even by operator override.
+                    self._store.append_event(
+                        "intent_unhandled",
+                        now=now,
+                        node_id=node.node_id,
+                        payload={
+                            "type": kind,
+                            "source": intent.source,
+                            "reason": "escalated ancestor",
+                        },
+                    )
+                    return
+                self._store.kv_delete(_k_unresolved(node.node_id))
                 self._store.set_state(node.node_id, NodeState.READY, now=now)
                 return
 
@@ -265,9 +284,11 @@ class Orchestrator:
 
         for node_id, item, depends_on in parsed_items:
             upstream_ids = []
+            unresolved: list[str] = []
             for key in depends_on:
                 upstream = self._store.resolve_external(item.provider, key)
                 if upstream is None:
+                    unresolved.append(key)
                     self._store.append_event(
                         "dependency_unresolved",
                         now=now,
@@ -277,6 +298,17 @@ class Orchestrator:
                 else:
                     upstream_ids.append(upstream)
             self._store.replace_upstreams(node_id, upstream_ids)
+            if unresolved:
+                # An unresolved dependency HOLDS the node (reported, never
+                # guessed at, ADR-0007); a human unblock intent overrides.
+                self._store.kv_set(_k_unresolved(node_id), json.dumps(unresolved))
+                node = self._store.get_node(node_id)
+                if node and node.state is NodeState.BLOCKED:
+                    self._store.set_blocked_reason(
+                        node_id, f"unresolved dependencies: {', '.join(unresolved)}", now=now
+                    )
+            else:
+                self._store.kv_delete(_k_unresolved(node_id))
 
         try:
             detect_cycles(self._store.all_edges())
@@ -601,6 +633,8 @@ class Orchestrator:
         states = {n.node_id: n.state for n in self._store.list_nodes()}
         edges = self._store.all_edges()
         for node_id in newly_ready(states, edges):
+            if self._store.kv_get(_k_unresolved(node_id)) is not None:
+                continue
             self._store.set_state(node_id, NodeState.READY, now=now)
             states[node_id] = NodeState.READY
         for node_id, ancestor in blocked_on_escalated(states, edges).items():
@@ -774,6 +808,20 @@ class Orchestrator:
             attempt=attempt if attempt is not None else node.attempt_count or None,
         )
         report.escalated += 1
+
+    def _has_escalated_ancestor(self, node_id: str) -> bool:
+        seen: set[str] = set()
+        stack = [node_id]
+        while stack:
+            for upstream in self._store.upstreams_of(stack.pop()):
+                if upstream in seen:
+                    continue
+                seen.add(upstream)
+                upstream_node = self._store.get_node(upstream)
+                if upstream_node and upstream_node.state is NodeState.ESCALATED:
+                    return True
+                stack.append(upstream)
+        return False
 
     def _provider_name(self) -> str:
         return self._config.tracker.provider

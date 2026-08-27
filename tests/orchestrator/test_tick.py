@@ -305,6 +305,36 @@ class TestIntents:
         prompt = h.runner.started[-1].dispatch.prompt
         assert "The acceptance criteria mean X, not Y." in prompt
 
+    def test_unblock_refused_under_escalated_ancestor(self, h: Harness) -> None:
+        # ADR-0006: never let dependents of an Escalated node proceed — an
+        # unblock intent must not bypass that rule.
+        h.add_item("#1", "Base")
+        h.add_item("#2", "On top", body="depends-on: #1")
+        h.orchestrator.tick()
+        h.runner.script_exit(h.node_id_for("#1"), 1, exit_code=0)  # empty diff
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.ESCALATED
+        h.store.add_intent(
+            intent_type="unblock", source="cli", node_id=h.node_id_for("#2"), now=h.clock()
+        )
+        h.orchestrator.tick()
+        assert h.state_of("#2") is NodeState.BLOCKED
+        kinds = [e.kind for e in h.store.events_after(0)]
+        assert "intent_unhandled" in kinds
+
+    def test_unblock_overrides_unresolved_external_dependency(self, h: Harness) -> None:
+        # The legitimate use: a dependency key that resolves to nothing (typo,
+        # foreign project) keeps a node Blocked; a human may override that.
+        h.add_item("#1", "Waits on a ghost", body="depends-on: #99")
+        h.orchestrator.tick()
+        assert h.state_of("#1") is NodeState.BLOCKED
+        h.store.add_intent(
+            intent_type="unblock", source="cli", node_id=h.node_id_for("#1"), now=h.clock()
+        )
+        h.orchestrator.tick()
+        # Applied on the next tick's intent step, then dispatched immediately.
+        assert h.state_of("#1") is NodeState.IN_PROGRESS
+
     def test_unknown_intent_recorded_not_crashing(self, h: Harness) -> None:
         h.store.add_intent(intent_type="approve-plan", source="cli", now=h.clock())
         h.orchestrator.tick()

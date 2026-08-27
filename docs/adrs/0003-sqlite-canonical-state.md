@@ -1,6 +1,14 @@
 # ADR-0003: SQLite is the canonical state store
 
 - Status: Accepted
+- Revision 2026-08-27: three tables beyond the spec's domain model —
+  `handoffs` (mandated by ADR-0013), `check_stats` (per-check flake rates,
+  ADR-0009), and `kv`, a small bookkeeping table for orchestrator operational
+  state: sync/projection cursors, the dispatch-pause flag, per-node PR
+  numbers, bootstrap flags, pending operator feedback, unresolved-dependency
+  holds, and per-cycle check re-run records. `kv` never carries canonical
+  node state (states, edges, leases, attempts live in their own tables); its
+  values are operational marks that are either reconstructible or advisory.
 - Date: 2026-08-27
 
 ## Context
@@ -34,7 +42,8 @@ state store. No ORM and no migration framework are introduced.
   A projection that disagrees with the database is stale, not authoritative.
 - **The schema comprises these tables:** `nodes`, `external_refs` (`node_id`,
   `provider`, `external_key`, `etag`), `edges`, `attempts`, `leases`, `intents`
-  and `events`. Leases carry a worker id and an expiry, following the
+  and `events`, plus `handoffs`, `check_stats` and the `kv` bookkeeping table
+  (revision above). Leases carry a worker id and an expiry, following the
   litequeue-modelled claim pattern: a worker claims a lease before dispatch and
   an expired lease releases the node.
 - **Migrate with plain sequential SQL scripts**, applied in order and tracked
