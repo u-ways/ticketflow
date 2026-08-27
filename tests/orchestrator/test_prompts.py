@@ -22,6 +22,9 @@ class TestBuildPrompt:
         assert "Mind the edge case." in prompt
         assert "src/api/" in prompt
         assert "handoff.md" in prompt
+        assert "Do NOT\ncommit `handoff.md`" in prompt or "Do NOT commit" in prompt.replace(
+            "\n", " "
+        )
         assert "Do NOT merge" in prompt
 
     def test_bootstrap_prompt_has_no_pr_instructions(self) -> None:
