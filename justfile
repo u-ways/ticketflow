@@ -42,6 +42,10 @@ audit:
     uvx pip-audit --strict -r requirements-audit.txt --disable-pip
     rm -f requirements-audit.txt
 
+# Seed or reset the demo epic on a tracker (see demo/README.md)
+demo *ARGS:
+    uv run python demo/seed.py {{ ARGS }}
+
 # Everything CI runs: lint, typecheck, tests with coverage
 check: lint typecheck cov
 

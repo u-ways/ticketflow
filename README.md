@@ -30,6 +30,18 @@ provides.
 The full design lives in [docs/architecture.md](docs/architecture.md), and every
 binding decision is recorded as an ADR in [docs/adrs/](docs/adrs/).
 
+## Demo
+
+A reproducible end-to-end demo — seed a sandbox tracker with a four-ticket
+dependency graph, run the orchestrator, watch agents take it to merged, then
+reset. See [demo/README.md](demo/README.md).
+
+```sh
+just demo seed-github --repo owner/sandbox
+uv run ticketflow run --config ticketflow.toml --yolo
+just demo reset-github --repo owner/sandbox --state-dir .ticketflow
+```
+
 ## Development
 
 Requires [uv](https://docs.astral.sh/uv/) and [just](https://github.com/casey/just).
