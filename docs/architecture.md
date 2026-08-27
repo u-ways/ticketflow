@@ -765,12 +765,14 @@ stateDiagram-v2
     InReview --> Emitting: human approves
     InReview --> Discarded: human rejects
     Emitting --> Emitted: every item and edge exists
+    Emitting --> Discarded: approval retracted, emission ledger still empty
     Emitted --> [*]
     Discarded --> [*]
 ```
 
-`Emitting` has no edge to `Discarded`: there is no rollback for a partially
-emitted plan — re-running emit is the recovery path (§13.7).
+`Emitting → Discarded` exists only to retract an approval nothing has acted
+on: once any item is emitted there is no rollback — re-running emit is the
+recovery path (§13.7, ADR-0014).
 
 **A long pause is not a long run.** The planner completes in minutes. Approval
 may take days, during which no process is resident — the proposal lives in
