@@ -23,7 +23,6 @@ concurrency:
 
 jobs:
     adr-review:
-        name: ADR review (Opus)
         runs-on: ubuntu-latest
         timeout-minutes: 20
         # Dependabot PRs cannot read the OAuth secret and never touch architecture;
