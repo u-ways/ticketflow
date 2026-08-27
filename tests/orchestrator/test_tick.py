@@ -437,3 +437,17 @@ class TestProjectionAndHalt:
         h.add_item("#1", "Work")
         report = h.orchestrator.tick()
         assert report.halted is False
+
+
+class TestParseIssueReporting:
+    def test_malformed_body_gets_event_and_comment_once(self, h: Harness) -> None:
+        # ADR-0007: malformed blocks are reported — an event AND an issue
+        # comment (the teaching mechanism) — and never repeated per sync.
+        h.add_item("#1", "Bad deps", body="depends-on: not a key!")
+        h.orchestrator.tick()
+        h.orchestrator.tick()  # same content re-fetched: no repeat
+        comments = [text for _, text in h.tracker.comments if "could not fully parse" in text]
+        assert len(comments) == 1
+        assert "not a key!" in comments[0]
+        events = [e for e in h.store.events_after(0) if e.kind == "body_parse_issue"]
+        assert len(events) == 1

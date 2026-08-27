@@ -285,11 +285,21 @@ class Orchestrator:
 
         parsed_items: list[tuple[str, TrackerItem, tuple[str, ...]]] = []
         for item in items:
-            node_id = self._upsert_item(item, now)
+            node_id, changed = self._upsert_item(item, now)
             parsed = parse_body(item.body)
-            for issue in parsed.issues:
-                self._store.append_event(
-                    "body_parse_issue", now=now, node_id=node_id, payload={"issue": issue}
+            if changed and parsed.issues:
+                # Report malformed blocks: an event AND a comment on the
+                # issue — the teaching mechanism of ADR-0007. Only on
+                # content change, so syncs do not repeat the comment.
+                for issue in parsed.issues:
+                    self._store.append_event(
+                        "body_parse_issue", now=now, node_id=node_id, payload={"issue": issue}
+                    )
+                listed = "\n".join(f"- {issue}" for issue in parsed.issues)
+                self._tracker.push_comment(
+                    item.external_key,
+                    "ticketflow could not fully parse this issue body:\n"
+                    f"{listed}\n\nMalformed entries are ignored, never guessed at.",
                 )
             parsed_items.append((node_id, item, parsed.depends_on))
             report.synced += 1
@@ -332,7 +342,8 @@ class Orchestrator:
         if next_cursor:
             self._store.kv_set(_K_SYNC_CURSOR, next_cursor)
 
-    def _upsert_item(self, item: TrackerItem, now: datetime) -> str:
+    def _upsert_item(self, item: TrackerItem, now: datetime) -> tuple[str, bool]:
+        """Insert or refresh one tracker item; returns (node_id, changed)."""
         node_id = self._store.resolve_external(item.provider, item.external_key)
         parsed = parse_body(item.body)
         if node_id is None:
@@ -355,20 +366,21 @@ class Orchestrator:
                 node_id=node_id,
                 payload={"external_key": item.external_key, "state": state.value},
             )
-        else:
-            existing = self._store.get_node(node_id)
-            if existing and (existing.title != item.title or existing.body != item.body):
-                self._store.update_node_content(
-                    node_id,
-                    title=item.title,
-                    body=item.body,
-                    scope_hints=parsed.scope,
-                    now=now,
-                )
-            self._store.link_external(
-                node_id, provider=item.provider, external_key=item.external_key, etag=item.etag
+            return node_id, True
+        existing = self._store.get_node(node_id)
+        changed = bool(existing and (existing.title != item.title or existing.body != item.body))
+        if changed:
+            self._store.update_node_content(
+                node_id,
+                title=item.title,
+                body=item.body,
+                scope_hints=parsed.scope,
+                now=now,
             )
-        return node_id
+        self._store.link_external(
+            node_id, provider=item.provider, external_key=item.external_key, etag=item.etag
+        )
+        return node_id, changed
 
     # -- step 3: reconcile running attempts --------------------------------
 
@@ -607,7 +619,11 @@ class Orchestrator:
             return
         if self._codehost.enable_auto_merge(pr_number):
             self._store.append_event(
-                "auto_merge_enabled", now=now, node_id=node_id, payload={"pr": pr_number}
+                "auto_merge_enabled",
+                now=now,
+                node_id=node_id,
+                attempt=node.attempt_count or None,
+                payload={"pr": pr_number},
             )
         # Otherwise: waiting on approvals; ask again next settle.
 
