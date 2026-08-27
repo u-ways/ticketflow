@@ -416,35 +416,11 @@ class Orchestrator:
     # -- step 3: reconcile running attempts --------------------------------
 
     def _reconcile_attempts(self, report: TickReport) -> None:
-        now = self._clock()
-        for node_id in self._store.expire_stale_leases(now=now):
-            node = self._store.get_node(node_id)
-            if node and node.state is NodeState.IN_PROGRESS:
-                # The process is presumed dead (a live one gets its lease
-                # extended every poll): retire its attempt so it stops
-                # holding dispatch capacity.
-                stale = self._store.get_attempt(node_id, node.attempt_count)
-                if stale and stale.status == "running":
-                    self._store.update_attempt(
-                        node_id, stale.attempt, status="aborted", finished_at=now
-                    )
-                expiries = int(self._store.kv_get(_k_lease_expiries(node_id)) or "0") + 1
-                self._store.kv_set(_k_lease_expiries(node_id), str(expiries))
-                self._store.append_event(
-                    "lease_expired",
-                    now=now,
-                    node_id=node_id,
-                    attempt=node.attempt_count or None,
-                )
-                if expiries >= self._config.limits.max_attempts:
-                    # ADR-0006 trigger: repeated lease expiry — the process
-                    # keeps dying without a heartbeat.
-                    self._escalate(node, f"repeated lease expiry ({expiries})", report)
-                else:
-                    self._store.set_state(
-                        node_id, NodeState.READY, now=now, attempt=node.attempt_count or None
-                    )
-
+        # Poll first, expire after (ADR-0010 adoption: re-attach live ones,
+        # harvest finished ones, expire the rest). Polling extends live
+        # leases and harvests finished attempts — including attempts that
+        # finished while the orchestrator was down — so the expiry sweep
+        # below only ever sees nodes with nothing pollable left.
         for attempt in self._store.running_attempts():
             now = self._clock()
             node = self._store.get_node(attempt.node_id)
@@ -497,6 +473,29 @@ class Orchestrator:
                 self._harvest_success(node, attempt.attempt, report)
             else:
                 self._handle_failure(node, result.failure_class, report)
+
+        now = self._clock()
+        for node_id in self._store.expire_stale_leases(now=now):
+            node = self._store.get_node(node_id)
+            if node is None or node.state is not NodeState.IN_PROGRESS:
+                continue
+            # Backstop: the node is active but nothing pollable remains (its
+            # process kept dying before an attempt could even be recorded).
+            expiries = int(self._store.kv_get(_k_lease_expiries(node_id)) or "0") + 1
+            self._store.kv_set(_k_lease_expiries(node_id), str(expiries))
+            self._store.append_event(
+                "lease_expired",
+                now=now,
+                node_id=node_id,
+                attempt=node.attempt_count or None,
+            )
+            if expiries >= self._config.limits.max_attempts:
+                # ADR-0006 trigger: repeated lease expiry.
+                self._escalate(node, f"repeated lease expiry ({expiries})", report)
+            else:
+                self._store.set_state(
+                    node_id, NodeState.READY, now=now, attempt=node.attempt_count or None
+                )
 
     def _harvest_success(self, node: Node, attempt: int, report: TickReport) -> None:
         now = self._clock()
@@ -593,8 +592,11 @@ class Orchestrator:
             )
             return
 
-        if node.attempt_count >= self._config.limits.max_attempts:
-            self._escalate(node, "runner crashed repeatedly", report)
+        crashes = self._store.bump_crash_count(node.node_id, now=now)
+        if crashes >= self._config.limits.max_attempts:
+            self._escalate(
+                node, "runner crashed repeatedly", report, attempt=node.attempt_count or None
+            )
         else:
             self._store.append_event(
                 "attempt_failed", now=now, node_id=node.node_id, attempt=node.attempt_count

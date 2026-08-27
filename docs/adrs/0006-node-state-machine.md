@@ -7,8 +7,12 @@
   push completes the node, spec §9.1 step 0), and `Blocked → Escalated` /
   `Ready → Escalated` (an operator cancel/reject intent pulls a node that has
   never run out of the graph; escalation already being the single
-  needs-a-human state, it also records deliberate withdrawal). The table
-  carries each edge's guard as a named condition; the guard's *predicate* is
+  needs-a-human state, it also records deliberate withdrawal). "Attempt
+  counters reset" on human re-entry means the FAILURE BUDGETS — the crash,
+  cycle and lease-expiry counters — never the attempt numbering, which is
+  monotonic for the node's lifetime: reusing an attempt number would reuse
+  the (node, attempt) idempotency key (ADR-0008) and its run directory
+  (ADR-0010). The table carries each edge's guard as a named condition; the guard's *predicate* is
   enforced at the edge's single orchestrator call site, because evaluating it
   needs I/O context (PR status, the lease table, run dirs) that the domain
   layer must not import. The store still rejects any edge not in the table.

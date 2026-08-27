@@ -103,6 +103,13 @@ MIGRATIONS: tuple[str, ...] = (
         value TEXT NOT NULL
     );
     """,
+    # 3: separate the crash budget from attempt numbering. Attempt numbers
+    # are monotonic and never reused — the (node, attempt) idempotency key
+    # (ADR-0008) and run-dir uniqueness depend on it — while a retry intent
+    # resets the failure budgets (crash_count, cycle_count) only.
+    """
+    ALTER TABLE nodes ADD COLUMN crash_count INTEGER NOT NULL DEFAULT 0;
+    """,
 )
 
 
