@@ -1,0 +1,32 @@
+# Reference template (unsupported): fail when a PR deletes tests or adds
+# skip/xfail markers. Pattern list is Python-flavoured; adapt to your stack.
+name: Test & skip ratchet
+
+on: pull_request
+
+permissions:
+    contents: read
+
+jobs:
+    test-skip-ratchet:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  fetch-depth: 0
+
+            - name: Fail on deleted tests or new skips
+              env:
+                  BASE: ${{ github.event.pull_request.base.sha }}
+                  HEAD: ${{ github.event.pull_request.head.sha }}
+              run: |
+                  DIFF=$(git diff "$BASE...$HEAD" --unified=0 -- '*test*')
+                  DELETED_TESTS=$(echo "$DIFF" | grep -E '^-' | grep -vE '^---' \
+                      | grep -cE '^\s*-\s*def test_' || true)
+                  NEW_SKIPS=$(echo "$DIFF" | grep -E '^\+' | grep -vE '^\+\+\+' \
+                      | grep -cE '@pytest\.mark\.(skip|skipif|xfail)|unittest\.skip' || true)
+                  echo "deleted test functions: $DELETED_TESTS, new skip markers: $NEW_SKIPS"
+                  if [ "$DELETED_TESTS" -gt 0 ] || [ "$NEW_SKIPS" -gt 0 ]; then
+                      echo "::error::This PR deletes tests or adds skip markers. If legitimate (e.g. a refactor moved them), a human must say so in review."
+                      exit 1
+                  fi

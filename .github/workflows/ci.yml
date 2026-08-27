@@ -1,0 +1,39 @@
+name: CI
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+
+permissions:
+    contents: read
+
+jobs:
+    quality:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+            - uses: astral-sh/setup-uv@v7
+              with:
+                  enable-cache: true
+            - uses: extractions/setup-just@v4
+            - run: just install
+            - run: just lint
+            - run: just typecheck
+
+    test:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+            - uses: astral-sh/setup-uv@v7
+              with:
+                  enable-cache: true
+            - uses: extractions/setup-just@v4
+            - run: just install
+            - run: just cov
+            - uses: actions/upload-artifact@v7
+              with:
+                  name: coverage
+                  path: coverage.xml
+                  if-no-files-found: ignore
