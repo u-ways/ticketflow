@@ -41,12 +41,16 @@ class ClaudeCliSynthesizer:
         binary: str = "claude",
         max_retries: int = 3,
         timeout_seconds: int = 600,
+        disallowed_tools: tuple[str, ...] = (),
     ) -> None:
         self._validate = validate
         self._model = model
         self._binary = binary
         self._max_retries = max_retries
         self._timeout_seconds = timeout_seconds
+        self._disallowed_tools = disallowed_tools
+        """Core-owned policy (ADR-0011), compiled to flags at spawn: the
+        adapter translates, it never authors the denylist."""
 
     def synthesize(self, request: SynthesisRequest) -> Plan:
         return self._run(
@@ -95,7 +99,9 @@ class ClaudeCliSynthesizer:
         raise PlanValidationError(f"synthesis did not converge: {error}")
 
     def _invoke(self, prompt: str) -> str:
-        command = [self._binary, "-p", prompt, "--output-format", "json"]
+        command = [self._binary, "-p", prompt, "--output-format", "json", "--max-turns", "8"]
+        if self._disallowed_tools:
+            command += ["--disallowedTools", *self._disallowed_tools]
         if self._model is not None:
             command += ["--model", self._model]
         result = subprocess.run(

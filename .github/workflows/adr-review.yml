@@ -38,7 +38,9 @@ jobs:
                   node-version: 24
 
             - name: Install Claude Code
-              run: npm install -g @anthropic-ai/claude-code
+              # Pinned exactly (ADR-0012: agent CLI packages move fast) —
+              # 2.1.250 broke --allowedTools matching and mooted the reviewer.
+              run: npm install -g @anthropic-ai/claude-code@2.1.248
 
             - name: Run ADR review agent
               env:

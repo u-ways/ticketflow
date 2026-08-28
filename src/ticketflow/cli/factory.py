@@ -138,6 +138,7 @@ def build_planner(
             validate=semantic_errors,
             model=config.planner.synthesis_model,
             max_retries=config.planner.synthesis_max_retries,
+            disallowed_tools=config.planner.synthesis_disallowed_tools,
         )
     elif config.planner.synthesis_model is None:
         # Model-free turns (approve, reject, emit, validate, edit) must

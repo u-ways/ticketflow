@@ -35,7 +35,8 @@ from 0, no edge may reference a missing item or form a cycle, and every item
 must be reachable as a small, independently mergeable change."""
 
 OUTPUT_CONTRACT = """\
-Answer with ONLY a JSON object — no prose, no markdown fences — of the form:
+Answer directly from the input below — do not use tools, do not read files,
+do not explore. Answer with ONLY a JSON object — no prose, no markdown fences — of the form:
 {"items": [{"index": 0, "title": "...", "body": "...", "scope": ["path/"]}],
  "edges": [{"upstream": 0, "downstream": 1, "confidence": 0.8,
             "evidence": "quoted or cited source"}],

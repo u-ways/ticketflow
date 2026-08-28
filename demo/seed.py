@@ -215,11 +215,52 @@ def seed_epic_github(repo: str, project_owner: str | None, project_number: int |
     )
 
 
+def seed_project_github(repo: str, owner: str, title: str) -> None:
+    """Create a fresh GitHub Project board plus the epic, for the
+    board-first planner demo (ADR-0014)."""
+    project = json.loads(
+        gh("project", "create", "--owner", owner, "--title", title, "--format", "json")
+    )
+    number = int(project["number"])
+    print(f"created project {owner}/{number}  {title}  {project.get('url', '')}")
+    gh("label", "create", DEMO_LABEL, "-R", repo, "--force", "--color", "5319e7")
+    url = gh(
+        "issue",
+        "create",
+        "-R",
+        repo,
+        "--title",
+        EPIC_TITLE,
+        "--body",
+        EPIC_BODY,
+        "--label",
+        DEMO_LABEL,
+    )
+    key = "#" + url.rstrip("/").rsplit("/", 1)[-1]
+    gh("project", "item-add", str(number), "--owner", owner, "--url", url)
+    print(f"created epic {key} on the board")
+    print(
+        "\nPoint ticketflow at the board (children are auto-added as their "
+        "states project):\n"
+        "  [tracker]\n"
+        f'  provider = "github"\n  repo = "{repo}"\n'
+        f'  project_owner = "{owner}"\n  project_number = {number}\n'
+        "\nThen decompose it:\n"
+        f"  uv run ticketflow plan new '{key}'          # ground + propose, then review\n"
+        f"  uv run ticketflow plan new '{key}' --yolo   # ...or approve and emit in one go"
+    )
+
+
 def _demo_issue(labels: list[str]) -> bool:
     return any(label == DEMO_LABEL or label.startswith("tf-plan-") for label in labels)
 
 
-def reset_github(repo: str, state_dir: Path | None) -> None:
+def reset_github(
+    repo: str,
+    state_dir: Path | None,
+    delete_project: int | None = None,
+    project_owner: str | None = None,
+) -> None:
     raw = gh(
         "api",
         f"repos/{repo}/issues?state=open&per_page=100",
@@ -238,6 +279,18 @@ def reset_github(repo: str, state_dir: Path | None) -> None:
     for ref in filter(None, refs_raw.splitlines()):
         gh("api", "-X", "DELETE", f"repos/{repo}/git/{ref}")
         print(f"deleted branch {ref.removeprefix('refs/heads/')}")
+
+    if delete_project is not None and project_owner is not None:
+        gh(
+            "project",
+            "delete",
+            str(delete_project),
+            "--owner",
+            project_owner,
+            "--format",
+            "json",
+        )
+        print(f"deleted project {project_owner}/{delete_project}")
 
     if state_dir is not None and state_dir.is_dir():
         shutil.rmtree(state_dir)
@@ -402,6 +455,17 @@ def main() -> None:
     reset_gh = commands.add_parser("reset-github", help="Close demo issues, delete tf/* branches.")
     reset_gh.add_argument("--repo", required=True)
     reset_gh.add_argument("--state-dir", type=Path, help="local ticketflow state dir to remove")
+    reset_gh.add_argument(
+        "--delete-project", type=int, help="also delete this demo-created board number"
+    )
+    reset_gh.add_argument("--project-owner", help="owner of --delete-project")
+
+    seed_proj = commands.add_parser(
+        "seed-project-github", help="Create a fresh Project board plus the epic (board-first demo)."
+    )
+    seed_proj.add_argument("--repo", required=True)
+    seed_proj.add_argument("--owner", required=True, help="user or org owning the new board")
+    seed_proj.add_argument("--title", default="ticketflow planner demo")
 
     seed_jr = commands.add_parser("seed-jira", help="Create the demo epic as Jira issues.")
     seed_epic_jr = commands.add_parser(
@@ -424,7 +488,9 @@ def main() -> None:
         email, token = jira_credentials(args)
         seed_epic_jira(args.base_url, args.project, email, token)
     elif args.command == "reset-github":
-        reset_github(args.repo, args.state_dir)
+        reset_github(args.repo, args.state_dir, args.delete_project, args.project_owner)
+    elif args.command == "seed-project-github":
+        seed_project_github(args.repo, args.owner, args.title)
     elif args.command == "seed-jira":
         email, token = jira_credentials(args)
         seed_jira(args.base_url, args.project, email, token)

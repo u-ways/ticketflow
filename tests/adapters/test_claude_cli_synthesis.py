@@ -63,7 +63,13 @@ def calls(tmp_path: Path) -> list[str]:
 
 
 def synthesizer(binary: str, model: str | None = None) -> ClaudeCliSynthesizer:
-    return ClaudeCliSynthesizer(validate=semantic_errors, model=model, binary=binary, max_retries=2)
+    return ClaudeCliSynthesizer(
+        validate=semantic_errors,
+        model=model,
+        binary=binary,
+        max_retries=2,
+        disallowed_tools=("Bash", "Read", "Write"),
+    )
 
 
 def request() -> SynthesisRequest:
@@ -113,6 +119,9 @@ class TestSynthesize:
         fake = make_fake_claude(tmp_path, GOOD_DRAFT, GOOD_DRAFT)
         synthesizer(fake, model="sonnet").synthesize(request())
         assert "--model sonnet" in calls(tmp_path)[0]
+        assert "--max-turns" in calls(tmp_path)[0]  # the anti-tool-loop cap
+        # ADR-0011: the no-tools policy compiles to flags, not just prose.
+        assert "--disallowedTools Bash Read Write" in calls(tmp_path)[0]
         (tmp_path / "count").write_text("1")
         (tmp_path / "calls.log").unlink()
         synthesizer(fake).synthesize(request())

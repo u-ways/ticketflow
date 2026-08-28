@@ -61,6 +61,22 @@ class PlannerConfig(BaseModel):
     exploration, it does not manage spend (ADR-0013). The token half of the
     guard is the runner's own ``limits.attempt_token_ceiling``, which
     applies to grounding attempts like any other."""
+    synthesis_disallowed_tools: tuple[str, ...] = (
+        "Bash",
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "WebFetch",
+        "WebSearch",
+        "Task",
+        "TodoWrite",
+        "NotebookEdit",
+    )
+    """ToolPolicy denylist compiled onto the claude-cli synthesis spawn
+    (ADR-0011): synthesis is a pure transformation, so every tool is denied
+    by default."""
     synthesis_max_retries: int = 3
     """Schema-or-semantic validation failures retried inside the synthesis
     loop before the turn fails (spec §13.3)."""

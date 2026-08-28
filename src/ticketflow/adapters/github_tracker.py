@@ -123,6 +123,14 @@ query ($owner: String!, $number: Int!) {
 }
 """
 
+_ADD_ITEM_MUTATION = """
+mutation ($project: ID!, $content: ID!) {
+  addProjectV2ItemById(input: {projectId: $project, contentId: $content}) {
+    item { id }
+  }
+}
+"""
+
 _UPDATE_TEXT_MUTATION = """
 mutation ($project: ID!, $item: ID!, $field: ID!, $text: String!) {
   updateProjectV2ItemFieldValue(
@@ -342,6 +350,10 @@ class GitHubTracker:
             return
         item_id = self._find_project_item(number, project.project_id)
         if item_id is None:
+            # A fresh board starts empty: add the issue like a human board
+            # curator would, then set its Status.
+            item_id = self._add_project_item(number, project.project_id)
+        if item_id is None:
             return
         self._graphql(
             _UPDATE_ITEM_MUTATION,
@@ -418,6 +430,19 @@ class GitHubTracker:
             self._blocked_field = (str(project["id"]), str(field["id"]))
             return self._blocked_field
         return None
+
+    def _add_project_item(self, number: int, project_id: str) -> str | None:
+        """Add the issue to the board; None (skip) on any failure — labels
+        already carry the state."""
+        try:
+            issue = self._get_issue(number)
+            data = self._graphql(
+                _ADD_ITEM_MUTATION, {"project": project_id, "content": str(issue.node_id)}
+            )
+        except Exception:
+            return None
+        added = (data.get("addProjectV2ItemById") or {}).get("item") if data else None
+        return str(added["id"]) if added and added.get("id") else None
 
     def _find_project_item(self, number: int, project_id: str) -> str | None:
         """The issue's item id on the configured board, or None."""
