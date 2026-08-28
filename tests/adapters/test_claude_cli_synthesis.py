@@ -63,7 +63,13 @@ def calls(tmp_path: Path) -> list[str]:
 
 
 def synthesizer(binary: str, model: str | None = None) -> ClaudeCliSynthesizer:
-    return ClaudeCliSynthesizer(validate=semantic_errors, model=model, binary=binary, max_retries=2)
+    return ClaudeCliSynthesizer(
+        validate=semantic_errors,
+        model=model,
+        binary=binary,
+        max_retries=2,
+        disallowed_tools=("Bash", "Read", "Write"),
+    )
 
 
 def request() -> SynthesisRequest:
