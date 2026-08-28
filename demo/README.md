@@ -63,6 +63,27 @@ emitted children carry `tf-plan-<plan-id>` labels, real `depends-on:` lines,
 and sub-issue/link mirrors; from here the run step below executes them like
 any human-authored graph.
 
+## 1a′. The board-first variant (GitHub Projects)
+
+The same planner arc, but the demo creates its OWN Project board and the
+board is the audience surface: the epic starts there alone, and every
+planner-emitted child is auto-added as its state first projects — you watch
+the board populate and move Backlog → In progress → Done live.
+
+```sh
+just demo seed-project-github --repo u-ways/ticketflow-qa-sandbox --owner u-ways
+```
+
+It prints the `[tracker]` config for the fresh board (a default Status field
+is all it needs). Plan, approve, emit and run exactly as above; native
+blocked-by relationships and the sub-issue hierarchy under the epic land as
+mirrors. Reset can take the board with it:
+
+```sh
+just demo reset-github --repo u-ways/ticketflow-qa-sandbox \
+    --state-dir .ticketflow --delete-project <N> --project-owner u-ways
+```
+
 ## 1b. The pre-wired demo (quick path)
 
 Seed the four-ticket diamond directly — created in dependency order so each

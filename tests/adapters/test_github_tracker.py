@@ -44,6 +44,7 @@ def _issue(
     return SimpleNamespace(
         number=number,
         id=number * 1000,  # database id, distinct from the issue number
+        node_id=f"NODE{number}",
         title=title,
         body=body,
         state=state,
@@ -133,12 +134,19 @@ class StubGraphQL:
         self.blocked_org_response: Any = None
         self.blocked_user_response: Any = None
         self.mutations: list[dict[str, Any]] = []
+        self.added_items: list[dict[str, Any]] = []
+        self.add_item_response: Any = None
 
     def __call__(self, query: str, variables: dict[str, Any] | None = None) -> Any:
         self.calls.append((query, dict(variables or {})))
         if "updateProjectV2ItemFieldValue" in query:
             self.mutations.append(dict(variables or {}))
             return {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "item"}}}
+        if "addProjectV2ItemById" in query:
+            self.added_items.append(dict(variables or {}))
+            if isinstance(self.add_item_response, Exception):
+                raise self.add_item_response
+            return {"addProjectV2ItemById": {"item": {"id": "ADDED"}}}
         if "projectItems" in query:
             return self._resolve(self.items_response)
         if 'field(name: "Blocked by")' in query:
@@ -446,17 +454,34 @@ class TestProjectProjection:
         assert stub.graphql.mutations == []
         assert stub.issues.added_labels == [(5, ("tf:escalated",))]  # labels still applied
 
-    def test_missing_project_item_skips_silently(self) -> None:
+    def test_missing_project_item_is_added_then_updated(self) -> None:
+        # A fresh board starts empty: the projection adds the issue to the
+        # project (what a human board does) and then sets its Status.
         tracker, stub = self._project_tracker()
+        stub.issues.issues_by_number[5] = _issue(5)
         stub.graphql.items_response = items_payload([{"id": "X", "project": {"id": "P-other"}}])
         tracker.push_state("#5", NodeState.READY)
-        assert stub.graphql.mutations == []
+        assert stub.graphql.added_items == [{"project": "P1", "content": "NODE5"}]
+        assert stub.graphql.mutations == [
+            {"project": "P1", "item": "ADDED", "field": "F1", "option": "O1"}
+        ]
 
-    def test_item_lookup_failure_skips_silently(self) -> None:
+    def test_add_item_failure_skips_silently(self) -> None:
+        tracker, stub = self._project_tracker()
+        stub.graphql.items_response = items_payload([])
+        stub.graphql.add_item_response = StubHttpError(403)
+        tracker.push_state("#5", NodeState.READY)
+        assert stub.graphql.mutations == []
+        assert stub.issues.added_labels == [(5, ("tf:ready",))]
+
+    def test_item_lookup_failure_falls_through_to_the_idempotent_add(self) -> None:
+        # addProjectV2ItemById returns the existing item for known content,
+        # so adding on a failed lookup is harmless and self-healing.
         tracker, stub = self._project_tracker()
         stub.graphql.items_response = StubHttpError(500)
         tracker.push_state("#5", NodeState.READY)
-        assert stub.graphql.mutations == []
+        assert len(stub.graphql.added_items) == 1
+        assert [m["item"] for m in stub.graphql.mutations] == ["ADDED"]
 
     def test_missing_project_skips_silently(self) -> None:
         tracker, stub = make_tracker(project=True)
