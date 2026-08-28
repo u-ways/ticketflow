@@ -20,6 +20,12 @@ runs/
 *.db-wal
 *.db-shm
 
+# local operator/demo state when running ticketflow from this checkout
+# (a real deployment may choose to commit its own config and plans/)
+ticketflow.toml
+.ticketflow/
+plans/
+
 # Editors / OS
 .idea/
 .vscode/

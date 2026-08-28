@@ -8,7 +8,10 @@ repo**; all demo issues carry `tf-demo` (children of a plan: `tf-plan-*`).
 - `gh auth status` logged in, scopes `repo`, `project`, `workflow`.
 - `claude` CLI authenticated (runner + planner synthesis, no API key needed).
 - `export GITHUB_TOKEN=$(gh auth token)` in the shell that runs ticketflow.
-- A `ticketflow.toml`:
+- A `ticketflow.toml` **in the directory you run the commands from** (that is
+  the `--config` default; `uv run ticketflow init` writes a starter, and
+  every command accepts `--config /path/to/file.toml`). Relative
+  `state_dir`/`plans_dir` resolve against that same directory:
 
 ```toml
 state_dir = ".ticketflow"
