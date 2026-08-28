@@ -29,6 +29,23 @@ from ticketflow.planner.synthesis import PlanDraft, RevisionRequest, SynthesisRe
 
 _FENCE_RE = re.compile(r"^```[a-z]*\n(?P<body>.*)\n```$", re.DOTALL)
 
+_NO_TOOLS = (
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
+    "WebFetch",
+    "WebSearch",
+    "Task",
+    "TodoWrite",
+    "NotebookEdit",
+)
+"""Synthesis is a pure transformation: the policy compiles to CLI flags like
+every other spawn (ADR-0011), denying tools deterministically — the prompt's
+no-tools sentence is guidance, this is the enforcement."""
+
 
 class ClaudeCliSynthesizer:
     """PlanSynthesizer over ``claude -p --output-format json``."""
@@ -95,10 +112,17 @@ class ClaudeCliSynthesizer:
         raise PlanValidationError(f"synthesis did not converge: {error}")
 
     def _invoke(self, prompt: str) -> str:
-        # Synthesis is a pure transformation: no tools, and a hard turn cap
-        # so a model reaching for tools cannot grind through denial loops
-        # for minutes (found live — the E2E hung here).
-        command = [self._binary, "-p", prompt, "--output-format", "json", "--max-turns", "8"]
+        command = [
+            self._binary,
+            "-p",
+            prompt,
+            "--output-format",
+            "json",
+            "--disallowedTools",
+            *_NO_TOOLS,
+            "--max-turns",
+            "8",
+        ]
         if self._model is not None:
             command += ["--model", self._model]
         result = subprocess.run(

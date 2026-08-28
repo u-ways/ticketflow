@@ -114,6 +114,8 @@ class TestSynthesize:
         synthesizer(fake, model="sonnet").synthesize(request())
         assert "--model sonnet" in calls(tmp_path)[0]
         assert "--max-turns" in calls(tmp_path)[0]  # the anti-tool-loop cap
+        # ADR-0011: the no-tools policy compiles to flags, not just prose.
+        assert "--disallowedTools Bash Read Write" in calls(tmp_path)[0]
         (tmp_path / "count").write_text("1")
         (tmp_path / "calls.log").unlink()
         synthesizer(fake).synthesize(request())
