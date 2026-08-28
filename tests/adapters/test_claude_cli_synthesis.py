@@ -113,6 +113,7 @@ class TestSynthesize:
         fake = make_fake_claude(tmp_path, GOOD_DRAFT, GOOD_DRAFT)
         synthesizer(fake, model="sonnet").synthesize(request())
         assert "--model sonnet" in calls(tmp_path)[0]
+        assert "--max-turns" in calls(tmp_path)[0]  # the anti-tool-loop cap
         (tmp_path / "count").write_text("1")
         (tmp_path / "calls.log").unlink()
         synthesizer(fake).synthesize(request())

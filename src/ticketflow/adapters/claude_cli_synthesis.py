@@ -95,7 +95,10 @@ class ClaudeCliSynthesizer:
         raise PlanValidationError(f"synthesis did not converge: {error}")
 
     def _invoke(self, prompt: str) -> str:
-        command = [self._binary, "-p", prompt, "--output-format", "json"]
+        # Synthesis is a pure transformation: no tools, and a hard turn cap
+        # so a model reaching for tools cannot grind through denial loops
+        # for minutes (found live — the E2E hung here).
+        command = [self._binary, "-p", prompt, "--output-format", "json", "--max-turns", "8"]
         if self._model is not None:
             command += ["--model", self._model]
         result = subprocess.run(
