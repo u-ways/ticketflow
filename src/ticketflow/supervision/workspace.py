@@ -13,7 +13,9 @@ class GitWorkspaces:
     """WorkspaceProvider backed by one base clone plus worktrees."""
 
     def __init__(self, root: Path, *, remote_url: str, default_branch: str = "main") -> None:
-        self._root = root
+        # Pinned absolute: git resolves a relative clone destination against
+        # the subprocess cwd, not ours, nesting the base clone under itself.
+        self._root = root.absolute()
         self._remote_url = remote_url
         self._default_branch = default_branch
 

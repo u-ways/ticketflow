@@ -23,7 +23,30 @@ repo = "u-ways/qa"
     config = load_config(path)
     assert config.tracker.provider == "github"
     assert config.limits.cycle_cap == 100
-    assert config.db_path == Path(".ticketflow/ticketflow.db")
+    assert config.db_path == tmp_path / ".ticketflow" / "ticketflow.db"
+
+
+def test_relative_dirs_anchor_at_config_file(tmp_path: Path) -> None:
+    # Regression: relative state_dir/plans_dir resolved against the process
+    # cwd, so `--config /elsewhere.toml` scattered state, and a relative
+    # workspaces root broke the base clone.
+    path = tmp_path / "ticketflow.toml"
+    path.write_text(
+        """
+state_dir = ".ticketflow"
+plans_dir = "plans"
+
+[tracker]
+provider = "github"
+repo = "u-ways/qa"
+
+[codehost]
+repo = "u-ways/qa"
+"""
+    )
+    config = load_config(path)
+    assert config.state_dir == tmp_path / ".ticketflow"
+    assert config.plans_dir == tmp_path / "plans"
 
 
 def test_full_toml_overrides(tmp_path: Path) -> None:
@@ -83,7 +106,7 @@ repo = "u-ways/qa"
     assert config.planner.grounding_allowed_tools == ("Read", "Grep", "Glob", "Write")
     assert config.planner.synthesis_backend == "pydantic-ai"
     assert config.planner.synthesis_max_retries == 3
-    assert config.plans_dir == Path("plans")
+    assert config.plans_dir == tmp_path / "plans"
 
 
 def test_planner_toml_overrides(tmp_path: Path) -> None:
@@ -107,4 +130,4 @@ grounding_timeout_seconds = 600
     config = load_config(path)
     assert config.planner.synthesis_model == "claude-sonnet-5"
     assert config.planner.grounding_timeout_seconds == 600
-    assert config.plans_dir == Path("docs/plans")
+    assert config.plans_dir == tmp_path / "docs" / "plans"

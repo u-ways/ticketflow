@@ -7,6 +7,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from ticketflow.supervision.process import is_alive, kill, spawn_detached
 from ticketflow.supervision.run_dirs import RunDir
 from ticketflow.supervision.workspace import GitWorkspaces
@@ -130,6 +132,19 @@ class TestGitWorkspaces:
         first = ws.prepare("n1", 1, bootstrap=False)
         again = ws.prepare("n1", 1, bootstrap=False)
         assert first == again
+
+    def test_relative_root_clones_base_under_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Regression: git resolves a relative clone destination against the
+        # subprocess cwd (the workspaces dir), which nested the base clone
+        # under itself and left every later git call pointing at nothing.
+        origin = self._make_origin(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        ws = GitWorkspaces(Path("state/ws"), remote_url=str(origin))
+        path = ws.prepare("n1", 1, bootstrap=False)
+        assert (tmp_path / "state" / "ws" / "base" / ".git").exists()
+        assert (path / "README.md").read_text() == "seed\n"
 
     def test_two_nodes_get_independent_worktrees(self, tmp_path: Path) -> None:
         origin = self._make_origin(tmp_path)
