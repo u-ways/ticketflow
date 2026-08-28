@@ -128,4 +128,14 @@ class Config(BaseModel):
 def load_config(path: Path) -> Config:
     with path.open("rb") as fh:
         raw = tomllib.load(fh)
-    return Config.model_validate(raw)
+    config = Config.model_validate(raw)
+    # Relative state_dir/plans_dir anchor at the config file's directory,
+    # not the process cwd — `--config /elsewhere.toml` must keep state
+    # beside its config. Joining leaves absolute values untouched.
+    anchor = path.absolute().parent
+    return config.model_copy(
+        update={
+            "state_dir": anchor / config.state_dir,
+            "plans_dir": anchor / config.plans_dir,
+        }
+    )
