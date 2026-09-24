@@ -132,7 +132,7 @@ wheels = [
 
 [[package]]
 name = "atlassian-python-api"
-version = "5.0.4"
+version = "5.0.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -143,9 +143,9 @@ dependencies = [
     { name = "requests-oauthlib" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/84/c2/40110a24a00d30984d85aac0b90ced450601e146c54f6d43580fe0f90790/atlassian_python_api-5.0.4.tar.gz", hash = "sha256:c11cf53283c795d84ddfb593f3c7503f3b0b3c20191fc3061781b2665c10f6b3", size = 1755934, upload-time = "2026-08-28T08:08:11.791Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/46/85/786f01d20ad6fddd95d01bd0585a39aad7cfe0cff9e63530770e817152ae/atlassian_python_api-5.0.5.tar.gz", hash = "sha256:ae7f34349939ec0674ffb9bea812bc3f4acb4b6ace9a7cf1c15141719669f3bb", size = 1989565, upload-time = "2026-09-14T20:20:45.87Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/53/93/b091e10f0c14430137b487626e97894ce0f69ad007726113bd239043f239/atlassian_python_api-5.0.4-py3-none-any.whl", hash = "sha256:b1f58d68d3a3bd9b7b8bd5a2c1ed006113bc5c4bd90c75350f66428685fb613c", size = 343098, upload-time = "2026-08-28T08:08:09.895Z" },
+    { url = "https://files.pythonhosted.org/packages/55/81/a91c05174ef68e44e7ce53a6ce8eeb647cbd80dc40c267b089a9e351729e/atlassian_python_api-5.0.5-py3-none-any.whl", hash = "sha256:647b650ff04f186bad1495caaed9772c249a2416a685fbacc1dfa340fa6376ab", size = 346005, upload-time = "2026-09-14T20:20:42.429Z" },
 ]
 
 [[package]]
